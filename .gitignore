@@ -27,3 +27,5 @@ htmlcov/
 replay_bundles/
 benchmark_results/
 .DS_Store
+slide/
+
