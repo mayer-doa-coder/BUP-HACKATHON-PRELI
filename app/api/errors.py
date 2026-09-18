@@ -81,6 +81,16 @@ class InterpretationUnavailable(GridWiseError):
     code = "interpretation_unavailable"
 
 
+class DirectiveCompilationFailure(GridWiseError):
+    """Validated directives compiled into an impossible constraint set.
+
+    Reaching this means a guardrail admitted something it should have rejected, so it is an
+    internal invariant failure rather than a caller error.
+    """
+
+    code = "directive_compilation_failure"
+
+
 class SolverFailure(GridWiseError):
     """LP or MILP returned a non-optimal status, or an optimizer invariant broke."""
 
@@ -213,6 +223,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 __all__ = [
     "CORRELATION_ID_HEADER",
+    "DirectiveCompilationFailure",
     "GridWiseError",
     "InterpretationUnavailable",
     "PipelineNotImplemented",

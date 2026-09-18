@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P2 COMPLETE — awaiting approval to start P3`
+**Status:** `P3 COMPLETE — awaiting approval to start P4`
 **Last updated:** 2026-09-18
-**Current phase:** P3 (not started)
-**Next action:** `T-030` (directive compiler)
+**Current phase:** P4 (not started)
+**Next action:** `T-040` (shared LP/MILP model)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P3 — Directive compiler (not started) |
-| Last completed task | `T-021` (P2 complete) |
-| Next task | `T-030` |
-| Tests passing | 64 / 64, `ruff check .` clean |
+| Phase | P4 — Shared LP/MILP model (not started) |
+| Last completed task | `T-031` (P3 complete) |
+| Next task | `T-040` |
+| Tests passing | 106 / 106, `ruff check .` clean |
 | Public cases passing | 0 / 10 |
 | Endpoint deployed | no |
 | Docker image | not built |
@@ -256,14 +256,14 @@ app/
 [ ] llm/base.py                 [ ] llm/interpreter.py      [ ] llm/prompts.py
 [ ] llm/providers/primary.py    [ ] llm/providers/backup.py [ ] llm/repair.py
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
-[ ] optimizer/compile_directives.py     [ ] optimizer/model.py         [ ] optimizer/lp_relaxation.py
+[x] optimizer/compile_directives.py     [ ] optimizer/model.py         [ ] optimizer/lp_relaxation.py
 [ ] optimizer/milp_solver.py            [ ] optimizer/hybrid_solve.py  [ ] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
 [ ] cache/request_cache.py
 [ ] demo/routes.py              [ ] demo/models.py
-[ ] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
+[x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
 tests/   unit/ integration/ regression/ security/ property/
 scripts/ run_public_cases.py  benchmark_latency.py  verify_docker.py  paraphrase_eval.py
@@ -337,14 +337,24 @@ An AST-level test asserts `replay.py` imports nothing from `app.optimizer`. 64 t
 > rules on purpose (D-09). If the compiler called replay's version, or vice versa, a composition bug would build the
 > plan and then approve it. P7 cross-checks them against real cases; a disagreement there is a genuine defect.
 
-### P3 — Directive compiler `[ ]`
+### P3 — Directive compiler `[x]`
 
-- `[ ] T-030` `optimizer/compile_directives.py` → `CompiledConstraints(effective_solar, min_energy, charge_allowed,
-  discharge_allowed, grid_upper, ambiguity_flags)` plus a per-hour provenance trace (internal only, Guide §39).
-- `[ ] T-031` `policies/spec_gaps.py` — the four provisional policies behind config flags (D-12).
-  *Acceptance:* composition tests (reserve `max`, cap `min`, ban union, ban+ban ⇒ idle, differing solar factors ⇒
-  `min(factor)` + ambiguity flag); post-compile assertions (`min_energy <= capacity`, `grid_upper >= 0`,
-  `effective_solar >= 0`, arrays of length 24); `factor=0.0` and `max_grid_kwh=0.0` survive compilation.
+- `[x] T-030` `optimizer/compile_directives.py` — `CompiledConstraints` (NumPy `effective_solar`, `min_energy`,
+  `charge_allowed`, `discharge_allowed`, `grid_upper`, plus `original_solar` / `solar_factor` for the demo layer),
+  `ConstraintTrace` provenance per Guide §39, `has_grid_cap` / `forced_idle_hours` helpers, and
+  `_assert_compiled_invariants()` raising the new `DirectiveCompilationFailure` (500) rather than clipping.
+  Directives are processed in `note_index` order so compilation is deterministic even under an order-sensitive policy.
+- `[x] T-031` `policies/spec_gaps.py` — `compose_solar_factors()` (used by the compiler), `expand_window()` (the single
+  deterministic statement of the window convention, consumed by the P8 prompt and the P18 paraphrase lab),
+  `through_is_end_exclusive()`, `single_hour_window()`, `policy_summary()` for the README and diagnostics.
+
+*Verified:* **the compiler and P2's `derive_envelope` agree on all five arrays across all 44 reference cases** — two
+independently written implementations of the same rules reaching the same answer. The comparison was probed to confirm
+it is sensitive (a flipped boolean, an `inf`→finite cap, and a 0.001 kWh solar drift are all caught) while tolerating
+1e-15 float noise. Composition tests cover reserve `max`, cap `min`, ban union, ban+ban ⇒ forced idle, and differing
+solar factors ⇒ `min(factor)` + ambiguity flag; `factor=0.0` / `max_grid_kwh=0.0` survive and are recorded in the trace;
+a reserve above capacity fails closed. Window tests assert the canonical §04.2 examples separately from the provisional
+policies. 106 tests green, `ruff check .` clean.
 
 ### P4 — Shared LP/MILP model `[ ]`
 
@@ -631,3 +641,26 @@ Append one entry per working session, newest last. Keep entries short and factua
   as a single `state_transition` violation instead of cascading into 23 misleading ones.
 - Next session starts at `T-030` (directive compiler) — the second, independent implementation of the same composition
   rules, plus `policies/spec_gaps.py`.
+
+### 2026-09-18 — Session 5 (P3 — directive compiler and spec-gap policies)
+
+- `T-030`/`T-031` complete. 106 tests green, `ruff check .` clean.
+- Written from the Problem Statement §5.3 rules rather than by copying P2's `derive_envelope`, and with a different
+  internal structure (NumPy arrays + provenance, versus plain lists). **The two now agree on every array across all 44
+  reference cases** — that agreement is the real payoff of the P2 independence decision, and it is now a standing test.
+- Extends P1's error taxonomy with `DirectiveCompilationFailure` (500). Reaching it means a guardrail admitted
+  something it should have rejected, so it fails closed instead of clipping a value into range.
+- I probed the cross-check for sensitivity before trusting it: a flipped boolean, an `inf`→finite cap, and a 0.001 kWh
+  solar drift are all detected, while 1e-15 float noise is tolerated. A comparison that cannot fail proves nothing.
+- **Known tension between D-09 and D-12, resolved deliberately:** the min-factor rule now exists in two places
+  (`spec_gaps.compose_solar_factors` and `replay._compose_solar_factor`). D-12 wants policy isolated; D-09 wants the
+  validator independent. The *policy value* is still single-sourced in config, so an organizer clarification remains a
+  one-value change and both implementations follow it. Only a wholly new policy kind would need two edits. Do not
+  resolve this by making replay import `app.policies` — the cross-check test is what keeps them honest.
+- `expand_window()` is policy code with no production caller yet; it lands here because this is where the four
+  provisional policies belong, and P8's prompt rules plus P18's paraphrase lab are generated from it. Tests separate
+  the canonical §04.2 examples (never change) from the provisional ones (change if organizers clarify).
+- Judgement call: a degenerate window (`expand_window(14, 14)`) returns `[]` rather than guessing "the whole day".
+  Inventing 24 hours of constraint from an ambiguous phrase is the more expensive error.
+- Next session starts at `T-040` (shared LP/MILP model): one variable layout and one constraint builder feeding both
+  the relaxation and the authoritative MILP.
