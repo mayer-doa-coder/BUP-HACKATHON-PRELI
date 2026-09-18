@@ -82,7 +82,12 @@ def solve_milp(model: OptimizationModel, settings: Settings | None = None) -> Mi
             integrality=model.integrality,
             bounds=Bounds(model.lower_bounds, model.upper_bounds),
             constraints=constraints,
-            options={"time_limit": settings.milp_time_limit_seconds},
+            options={
+                "time_limit": settings.milp_time_limit_seconds,
+                # Explicit: without this HiGHS stops at its default 1e-4 relative gap and still
+                # reports success, so a slightly suboptimal plan would be labelled optimal.
+                "mip_rel_gap": settings.milp_relative_gap,
+            },
         )
     except Exception as exc:  # noqa: BLE001 - any solver failure becomes a controlled status
         return MilpResult(

@@ -1,0 +1,26 @@
+# Local run only. Deployment to Azure uses the image directly — see DOCKER.md.
+#
+# Before the first run:   cp .env.example .env   and fill in LLM_MODEL / LLM_API_KEY.
+# The .env file is gitignored and is never copied into the image; it is mounted as environment
+# at run time only.
+
+services:
+  gridwise:
+    build:
+      context: .
+    image: gridwise:local
+    container_name: gridwise
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Explicit so the published port, the app, and the health probe cannot disagree.
+      PORT: "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

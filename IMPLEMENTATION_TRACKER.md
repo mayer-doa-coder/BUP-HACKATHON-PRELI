@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P9 + P10 COMPLETE — awaiting approval to start P11`
+**Status:** `P11 + P12 + P13 COMPLETE, Docker pulled forward — awaiting approval to start P14`
 **Last updated:** 2026-09-18
-**Current phase:** P11 (not started)
-**Next action:** `T-110` (end-to-end public regression through the real endpoint)
+**Current phase:** P14 (not started)
+**Next action:** `T-140` (cache, budgets, resource protection)
 
 ---
 
@@ -57,13 +57,13 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P11 — End-to-end public regression (not started) |
-| Last completed task | `T-101` (P9 + P10 complete) |
-| Next task | `T-110` |
-| Tests passing | 301 / 301 (+2 `live` deselected), `ruff check .` clean |
-| Public cases passing | 10 / 10 optimizer-path, 44 / 44 incl. extended. LLM path proven with a stubbed provider; needs credentials (O-01) for a live run |
+| Phase | P14 — Cache, budgets, resource protection (not started) |
+| Last completed task | `T-131` (P11-P13 complete; P16 Docker pulled forward) |
+| Next task | `T-140` |
+| Tests passing | 366 / 366 (+2 `live` deselected), `ruff check .` clean |
+| Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
-| Docker image | not built |
+| Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
 | README | not written |
 
 Local toolchain verified: Python 3.14 (dev) with FastAPI 0.138.1, Pydantic 2.12.5, NumPy 2.4.2, SciPy 1.17.1,
@@ -246,8 +246,8 @@ Tick a row when the file exists and its tests pass.
 
 ```
 [x] pyproject.toml              [x] requirements.txt        [x] .env.example
-[x] .gitignore                  [x] .dockerignore           [ ] Dockerfile
-[ ] docker-compose.yml          [ ] README.md               [ ] .github/workflows/ci.yml
+[x] .gitignore                  [x] .dockerignore           [x] Dockerfile
+[x] docker-compose.yml          [~] README.md   [x] DOCKER.md               [ ] .github/workflows/ci.yml
 
 app/
 [x] main.py                     [x] config.py
@@ -266,7 +266,8 @@ app/
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
 tests/   unit/ integration/ regression/ security/ property/
-scripts/ [x] run_public_cases.py  [ ] benchmark_latency.py  [ ] verify_docker.py  [ ] paraphrase_eval.py
+scripts/ [x] run_public_cases.py  [ ] benchmark_latency.py  [x] verify_docker.py  [x] paraphrase_eval.py
+         [x] verify_solver.py  [x] healthcheck.py  [x] semantic_corpus.py
 public_cases/sample_cases.json   # copied from docs/, never edited
 ```
 
@@ -522,29 +523,65 @@ a feasible first interpretation is never reinterpreted. Replay failure still tri
 > the directive should have been. Handing over the expected value would make the pipeline look correct while the
 > model's actual understanding stayed wrong — and hidden cases would then fail exactly where it matters.
 
-### P11 — End-to-end public regression `[ ]`
+### P11 — End-to-end public regression `[x]`
 
-- `[ ] T-110` All 10 cases through the real HTTP endpoint with the real interpreter.
-  *Acceptance:* interpretation semantics match ground truth (type, hours, numerics — explanation text free), plan valid,
-  cost within tolerance, latency recorded per case.
+- `[x] T-110` `tests/regression/test_end_to_end.py` — all 10 public and 34 extended cases through the **real HTTP
+  endpoint**, graded the way the judge grades: interpretation semantics, replay validity, recalculated cost, latency.
+  The model is a deterministic stub that **asserts it received the production prompt and schema**, so the suite cannot
+  pass with the interpreter bypassed.
 
-### P12 — Semantic & adversarial corpus `[ ]`
+*Verified:* 11 tests. 44/44 cases return 200 with exactly the seven canonical fields, correct interpretation,
+replay-clean plans and the published optimal cost; `no_op` keeps its explicit `null`; repeated requests are byte
+identical; `/health` stays available alongside traffic; the 400/422 mapping still holds with a live interpreter
+behind it. Two spend guards asserted: a **structurally invalid request never reaches the model**, and neither does a
+**baseline-infeasible scenario**. Optimization ratio `min(1, optimal/team)` is exactly **1.000000 on all 44**.
 
-- `[ ] T-120` Build the immutable gold corpus — hundreds of fixtures across the families in Guide §26 / PRD §17.2 /
-  research "Edge cases": 12 h vs 24 h, noon/midnight, shared suffix, `until`/`between`/number words, unicode dashes,
-  non-breaking spaces, fractions, decimal percentages, thousands separators, the to/by/reduction/operates-at contrast
-  set, zero factor, zero grid cap, capacity-relative reserves, distractors containing energy vocabulary, prompt
-  injection, schema-looking note text, note reordering, three-note scenarios.
-- `[ ] T-121` `scripts/paraphrase_eval.py` — per-model / per-prompt-version scorecard (type match, hours match, numeric
-  match, `no_op` accuracy, guardrail pass rate, p50/p95/p99).
-  *Acceptance:* labels are hand-verified for every percentage and time case; provisional-policy cases live in a separate
-  bucket so an organizer clarification cannot silently move the headline number.
+### P12 — Semantic & adversarial corpus `[x]`
 
-### P13 — Property & metamorphic tests `[ ]`
+- `[x] T-120` `scripts/semantic_corpus.py` — loads the corpus into three **separately scored buckets**: `semantic`
+  (58 paraphrases across 7 groups), `adversarial` (5 injection notes), `provisional` (spec-gap cases). Each case
+  carries its own battery context (a percentage reserve resolves against capacity) and builds a complete, feasible
+  `OptimizeRequest` from a synthetic 24-hour profile that never reaches the model.
+- `[x] T-121` `scripts/paraphrase_eval.py` — per-bucket scorecard (exact match, directive-type match, guardrail pass
+  rate, `no_op` relevance, p50/p95 latency), stamped with the prompt/schema/model versions that produced it. The
+  provisional bucket is **excluded from the pass threshold** by design.
+- `[x]` `tests/security/test_prompt_injection.py` — the three structural defence layers.
 
-- `[ ] T-130` Random feasible scenario generator + the invariants in Guide §27.
-- `[ ] T-131` Metamorphic properties: more solar cannot raise cost; tightening a feasible reserve or grid cap cannot
-  lower it; removing a hard constraint cannot worsen the objective; repeated solves are deterministic within tolerance.
+*Verified:* 35 tests, all offline. Corpus integrity: every canonical answer passes **our own** guardrails and compiles
+into constraints (otherwise the target itself would be wrong), the synthetic scenarios are schedulable, and no corpus
+note echoes published sample wording. Policy agreement: the pack's provisional answers for cross-midnight (`[0,1,23]`)
+and single-hour (`[16]`) match `expand_window`/`single_hour_window` exactly, and AMB-03's "most restrictive" rule
+matches the compiler. **The scorer is proven able to fail** — it detects an inverted factor, an off-by-one window, a
+guardrail rejection, and survives a provider outage mid-run. Injection: each of the 5 notes stays a JSON-escaped
+string value, cannot widen the schema, and its *genuine* instruction is still honoured; a model that obeys an
+injection is refused by the guardrail; a legitimate note containing "ignore"/"override"/"system" is **not** filtered.
+
+> **No keyword filtering, deliberately.** A real operator note can contain "ignore", "system" or "override", and
+> discarding a genuine directive because it looked suspicious would lose the case outright. Defence is structural:
+> escaped data block, explicit data-boundary instruction, closed schema, deterministic guardrails.
+
+*Still needs credentials (O-01):* the actual paraphrase accuracy of the real model. Everything the measurement
+depends on is verified; the measurement itself is one `python scripts/paraphrase_eval.py` away.
+
+### P13 — Property & metamorphic tests `[x]`
+
+- `[x] T-130` `tests/property/test_optimizer_properties.py` — a **seeded** random scenario generator (reproducible
+  from the printed seed; `random.Random`, no new dependency) over 40 scenarios including negative tariffs,
+  zero-capacity batteries and zero rate limits. Invariants per Guide §27: replayable plan, no simultaneous
+  charge/discharge, `LP <= MILP`, every compiled bound respected, deterministic solving.
+- `[x] T-131` Metamorphic relations: more solar never costs more; reducing solar never costs less; a grid cap pinned
+  to the unconstrained peak never costs less; a reserve floor the plan already meets never costs less; removing a ban
+  never costs more; a `no_op` changes nothing; **shuffling the request's hour order changes nothing**. Plus degenerate
+  batteries (absent, pinned full, starts empty, cannot charge, cannot discharge) and an all-zero scenario.
+
+*Verified:* 18 tests. The metamorphic constraints are constructed to be **feasible by construction** (pinned to the
+unconstrained solution), because an arbitrary invented constraint can make a scenario infeasible and the property then
+simply does not apply — a lesson carried over from P5.
+
+> **This phase found a real, score-affecting bug.** `scipy.optimize.milp` inherits HiGHS's default 1e-4 relative MIP
+> gap, so it stopped at a near-optimal solution *and still reported success*: adding a constraint appeared to lower
+> the optimal cost, which is impossible for nested feasible sets. Now pinned to exact optimality with
+> `MILP_RELATIVE_GAP=0.0`, with a regression test asserting `mip_gap == 0` and MILP == LP bound.
 
 ### P14 — Cache, budgets, resource protection `[ ]`
 
@@ -562,10 +599,15 @@ a feasible first interpretation is never reinterpreted. Replay failure still tri
 
 ### P16 — Docker & deployment `[ ]`
 
-- `[ ] T-160` Dockerfile per Guide §34 — pinned base, deps installed at build time, non-root user, `HEALTHCHECK` →
-  `/health`, no secrets in layers or build args. `.dockerignore` excludes `.git`, venvs, `.env`.
-- `[ ] T-161` `scripts/verify_docker.py` — build, run, `/health`, one full `/optimize-energy`, assert replay PASS inside
-  the container, and assert that SciPy LP **and** MILP both work in the final image.
+- `[x] T-160` **Pulled forward at the user's request (session 11)** — `Dockerfile` (pinned `python:3.12-slim-bookworm`,
+  deps installed before source for layer caching, non-root uid 10001, `HEALTHCHECK` → `/health`, `$PORT` honored for
+  Azure, no secrets in layers or build args), `docker-compose.yml`, and `DOCKER.md` (build, run, env var names,
+  registry push, Azure Container Apps **and** App Service recipes, security checklist, troubleshooting).
+- `[x] T-161` `scripts/verify_docker.py` — builds, runs, waits for `/health`, posts a real public case, **replays the
+  returned plan**, then asserts non-root and no baked-in credentials. `scripts/verify_solver.py` runs **inside the
+  image at build time** and fails the build if SciPy cannot actually solve an LP and a MILP;
+  `scripts/healthcheck.py` reads `$PORT` so a platform-assigned port cannot look like a dead service.
+  **Not yet executed:** no Docker daemon on the authoring machine — see the session log.
 - `[ ] T-162` Deploy to the chosen platform (O-03); verify both endpoints from an external network; push an immutable
   tag/digest to the registry (O-04).
 
@@ -916,3 +958,36 @@ Append one entry per working session, newest last. Keep entries short and factua
   is not an improvement, and reporting the original failure keeps diagnosis honest.
 - Next session starts at `T-110`: the end-to-end public regression through the real endpoint, which needs a pinned
   provider (O-01) to run against a live model — `scripts/run_public_cases.py --endpoint URL` already supports it.
+
+### 2026-09-18 — Session 11 (Docker pulled forward, then P11 + P12 + P13)
+
+- Docker (`T-160`/`T-161`) was **pulled out of P16 at the user's request** — a teammate needs it now to deploy on
+  Azure from a different machine. `Dockerfile`, `docker-compose.yml`, `DOCKER.md`, `verify_docker.py`,
+  `verify_solver.py` and `healthcheck.py` are written.
+  **Honest limitation: the image has never been built.** This machine has the Docker CLI but no running daemon. What
+  *was* verified locally: the build-time solver check passes, the healthcheck script returns 0 when healthy and 1 on a
+  wrong port, and `.dockerignore` keeps `.env`/`.git`/`tests`/`docs` out while keeping everything the image needs in.
+  `scripts/verify_docker.py` exists precisely to close that gap on a machine with a daemon.
+- **One Docker bug was caught before it shipped:** `python scripts/verify_solver.py` puts `scripts/` on `sys.path`,
+  not the working directory, so `import app` failed — it would have broken the image build. Both scripts now bootstrap
+  the repo root explicitly, the same way `run_public_cases.py` does.
+- `$PORT` is honored throughout (Dockerfile CMD, healthcheck, compose) because Azure assigns the port. A container
+  hard-coded to 8000 would have looked dead to the platform's probe.
+- **P13 found a real, score-affecting bug in P5's solver.** A metamorphic test reported that *adding* a constraint
+  lowered the optimal cost — impossible for nested feasible sets. Root cause: `scipy.optimize.milp` inherits HiGHS's
+  default **1e-4 relative MIP gap**, so it stops at a provably near-optimal solution and still returns `status=0`,
+  which this service was mapping to `proven_optimal=True`. On one seed it returned 21544.38 against a true optimum of
+  21543.34. Optimization credit is `min(1, optimal/team_cost)`, so that was free score being given away — and the
+  "proven optimal" claim was false. Fixed with `MILP_RELATIVE_GAP=0.0` plus a regression test asserting
+  `mip_gap == 0` and MILP == LP bound on every public case. This is exactly what property tests are for: 44 reference
+  cases never exposed it.
+- P11's stub provider **asserts it received the production prompt and schema**, so the end-to-end suite cannot quietly
+  degrade into testing a bypassed interpreter. Two spend guards are asserted there too: neither a structurally invalid
+  request nor a baseline-infeasible scenario ever reaches the model.
+- P12 keeps three separately scored buckets and **excludes the provisional one from the pass threshold** — a "failure"
+  on an undefined case may only mean the organizers chose the other reading, and letting that move the headline number
+  would mask a real regression. The scorer is itself tested for the ability to fail.
+- Rejected keyword filtering of injected notes: a genuine operator note can contain "ignore", "system" or "override",
+  and dropping a real directive because it looked suspicious would lose the case. Defence is structural instead.
+- Next session starts at `T-140`: parser/response caching with version-aware keys, request budgets, and concurrency
+  limits. **O-01 (provider + pinned model) is now the main blocker** for live semantic accuracy and deployment.

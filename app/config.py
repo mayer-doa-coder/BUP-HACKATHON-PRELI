@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     lp_solver_method: str = "highs"
     milp_solver: str = "highs"
     milp_time_limit_seconds: float = 3.0
+    # HiGHS defaults to a 1e-4 relative MIP gap, which stops at a *provably near-optimal*
+    # solution and still reports success. Optimization credit is min(1, optimal/team_cost), so
+    # a needless 0.01% gap is a needless score loss — and it would make "proven optimal" false.
+    # Solve to exact optimality; the model is small enough that this costs nothing.
+    milp_relative_gap: float = 0.0
     internal_tolerance: float = 1e-7
     judge_tolerance: float = 0.01
     optimizer_version: str = "lp-milp-v1"

@@ -411,3 +411,29 @@ def test_invariant_breach_is_reported_rather_than_returned(public_cases, monkeyp
 
     assert outcome.status is SolveStatus.SOLVER_FAILURE
     assert any("below the LP lower bound" in detail for detail in outcome.detail)
+
+
+def test_milp_solves_to_exact_optimality_not_a_near_optimal_gap(public_cases):
+    """Regression: HiGHS defaults to a 1e-4 relative MIP gap and still reports success.
+
+    Found by the metamorphic suite — adding a constraint appeared to *lower* the optimal cost,
+    which is impossible for nested feasible sets. The real cause was the solver stopping at a
+    provably near-optimal solution while `status=0` made it look proven optimal. Optimization
+    credit is `min(1, optimal/team_cost)`, so an unnecessary 0.01% gap is an unnecessary score
+    loss, and `proven_optimal` would have been a false claim.
+
+    The LP relaxation is the true lower bound here, so an exactly-solved MILP must match it.
+    """
+    from app.optimizer.lp_relaxation import solve_lp_relaxation
+
+    for case in public_cases:
+        request, directives = _parsed(case)
+        model = build_model(request, compile_directives(request, directives))
+
+        lp = solve_lp_relaxation(model)
+        milp_result = solve_milp(model)
+
+        assert milp_result.status is MilpStatus.OPTIMAL, case["id"]
+        assert milp_result.mip_gap == pytest.approx(0.0, abs=1e-12), case["id"]
+        # Any residual gap would show up as the MILP sitting above its own lower bound.
+        assert milp_result.cost == pytest.approx(lp.cost, abs=1e-6), case["id"]
