@@ -1,0 +1,11 @@
+# Pinned runtime dependencies for the judge path.
+# These exact versions are the ones the service is developed and tested against;
+# the Docker image installs this file so the image and local runs match.
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
+pydantic==2.12.5
+pydantic-settings==2.14.2
+numpy==2.4.2
+scipy==1.17.1
+httpx==0.28.1
+python-dotenv==1.2.2

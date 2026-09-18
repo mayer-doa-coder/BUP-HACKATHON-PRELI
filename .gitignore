@@ -1,0 +1,29 @@
+# Secrets — never commit a populated environment file.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local artifacts
+*.log
+replay_bundles/
+benchmark_results/
+.DS_Store

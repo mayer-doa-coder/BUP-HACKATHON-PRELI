@@ -8,6 +8,8 @@ This is a **greenfield repo**: only `LICENSE` and `docs/` exist. No application 
 
 Project: **GridWise** — an LLM-assisted smart-campus energy optimizer for the BUP CSE Fest 2026 hackathon preliminary. One HTTP service, judged by an automated harness.
 
+**Start every session by reading [IMPLEMENTATION_TRACKER.md](IMPLEMENTATION_TRACKER.md).** It carries the live status, the locked/open decisions, the phased task board (`T-001`..`T-202`), and the session log, so work can resume in a new chat without re-reading `docs/`. Update it as part of every task — the task marker, the status snapshot, and a session-log entry.
+
 ## Source document hierarchy
 
 | Document | Authority |
