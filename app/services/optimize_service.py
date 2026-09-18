@@ -32,6 +32,8 @@ from app.api.errors import (
     SolverFailure,
 )
 from app.config import Settings, get_settings
+from app.llm.base import InterpreterError
+from app.llm.interpreter import LlmDirectiveInterpreter, build_interpreter, coerce_to_canonical
 from app.optimizer.hybrid_solve import SolveOutcome, SolveStatus, hybrid_solve, screen_baseline_feasibility
 from app.optimizer.result import build_hourly_plan
 from app.schemas.directive import DirectiveInterpretation
@@ -46,8 +48,23 @@ from app.validation.totals import recalculate_totals
 class OptimizeService:
     """Owns the per-request pipeline. Stateless apart from its settings and interpreter."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        interpreter: LlmDirectiveInterpreter | None = None,
+    ) -> None:
         self._settings = settings or get_settings()
+        # Built once, not per request: the provider holds a pooled HTTP client, and a fresh TLS
+        # handshake on every judged call would eat into the latency budget for nothing.
+        self._interpreter = interpreter if interpreter is not None else build_interpreter(self._settings)
+
+    @property
+    def interpreter(self) -> LlmDirectiveInterpreter | None:
+        return self._interpreter
+
+    async def aclose(self) -> None:
+        if self._interpreter is not None:
+            await self._interpreter.aclose()
 
     async def run(self, request: OptimizeRequest) -> OptimizeResponse:
         self.validate(request)
@@ -93,12 +110,26 @@ class OptimizeService:
             )
 
     async def interpret(self, request: OptimizeRequest) -> list[DirectiveInterpretation]:
-        """Seam for the LLM interpreter (P8) and its deterministic guardrails (P9).
+        """Interpret the operator notes with the language model.
 
-        Deliberately not implemented with a keyword matcher: a regex fallback would defeat the
-        mandatory-LLM requirement outright, so until the interpreter lands this fails closed.
+        There is deliberately no keyword-matching fallback. A regex interpreter would defeat the
+        mandatory-LLM requirement outright, so when the model is unusable this fails closed
+        rather than guessing. The bounded, failure-class-specific retry policy lands in P10;
+        today a single attempt is made and any failure becomes a controlled error.
         """
-        raise InterpretationUnavailable("the directive interpreter is not configured")
+        if self._interpreter is None:
+            raise InterpretationUnavailable("the directive interpreter is not configured")
+
+        try:
+            outcome = await self._interpreter.interpret(request)
+            # Untrusted until this passes. P9 replaces the shape gate with classified guardrails
+            # plus one bounded repair attempt.
+            return coerce_to_canonical(outcome.raw_items)
+        except InterpreterError as exc:
+            raise InterpretationUnavailable(
+                "The operator notes could not be interpreted.",
+                details=[type(exc).__name__],
+            ) from exc
 
     def solve_and_build(
         self,

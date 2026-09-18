@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P6 COMPLETE — awaiting approval to start P7`
+**Status:** `P7 + P8 COMPLETE — awaiting approval to start P9`
 **Last updated:** 2026-09-18
-**Current phase:** P7 (not started)
-**Next action:** `T-070` (public-case regression script)
+**Current phase:** P9 (not started)
+**Next action:** `T-090` (deterministic guardrails)
 
 ---
 
@@ -57,11 +57,11 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P7 — Public-case regression (not started) |
-| Last completed task | `T-062` (P6 complete) |
-| Next task | `T-070` |
-| Tests passing | 173 / 173, `ruff check .` clean |
-| Public cases passing | 10 / 10 optimizer-path (44 / 44 incl. extended); LLM path pending P8 |
+| Phase | P9 — Deterministic guardrails (not started) |
+| Last completed task | `T-082` (P7 + P8 complete) |
+| Next task | `T-090` |
+| Tests passing | 237 / 237 (+2 `live` deselected), `ruff check .` clean |
+| Public cases passing | 10 / 10 optimizer-path, 44 / 44 incl. extended. LLM path proven with a stubbed provider; needs credentials (O-01) for a live run |
 | Endpoint deployed | no |
 | Docker image | not built |
 | README | not written |
@@ -253,8 +253,8 @@ app/
 [x] main.py                     [x] config.py
 [x] api/routes.py               [x] api/errors.py           [x] api/middleware.py
 [x] schemas/request.py          [x] schemas/directive.py    [x] schemas/response.py    [ ] schemas/internal.py
-[ ] llm/base.py                 [ ] llm/interpreter.py      [ ] llm/prompts.py
-[ ] llm/providers/primary.py    [ ] llm/providers/backup.py [ ] llm/repair.py
+[x] llm/base.py                 [x] llm/interpreter.py      [x] llm/prompts.py   [x] llm/schema.py
+[x] llm/providers/openai_provider.py  [x] llm/providers/anthropic_provider.py  [ ] llm/repair.py
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
 [x] optimizer/compile_directives.py     [x] optimizer/model.py         [x] optimizer/lp_relaxation.py
 [x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [x] optimizer/result.py
@@ -266,7 +266,7 @@ app/
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
 tests/   unit/ integration/ regression/ security/ property/
-scripts/ run_public_cases.py  benchmark_latency.py  verify_docker.py  paraphrase_eval.py
+scripts/ [x] run_public_cases.py  [ ] benchmark_latency.py  [ ] verify_docker.py  [ ] paraphrase_eval.py
 public_cases/sample_cases.json   # copied from docs/, never edited
 ```
 
@@ -424,22 +424,47 @@ returns 200 with exactly the seven fields, and the parsed body replays clean. 17
 > `(6, 9, None)` decimal places and keeps the first that replays clean. A regression test reproduces the failure
 > deliberately. Do not collapse the ladder to a single rung.
 
-### P7 — Public-case optimizer regression (no LLM) `[ ]`
+### P7 — Public-case optimizer regression (no LLM) `[x]`
 
-- `[ ] T-070` `scripts/run_public_cases.py` — feeds the pack's **ground-truth** directives straight into the compiler and
-  solvers, bypassing the LLM.
-  *Acceptance:* all 10 cases — LP feasible, MILP optimal, `LP <= MILP + tol`, replay PASS, and cost within 0.01 of the
-  published reference. Action sequences need not match the reference.
+- `[x] T-070` `scripts/run_public_cases.py` — two modes from one runner: **local** (ground-truth directives straight
+  into the compiler and solvers, isolating the deterministic half) and **`--endpoint URL`** (POSTs to a running
+  service, exercising the full LLM path — reused by P11 and P16). Reports interpretation / validity / cost gap /
+  latency per case, `--extended` adds the 34-case pack, `--json` emits machine-readable output, and it exits non-zero
+  on any failure so it works as a CI gate. A path bootstrap lets it run from a clean checkout without installation.
+- `[x]` `app/validation/interpretation_match.py` — compares an interpretation against a reference on exactly what the
+  organizers check (relevance, type, hours, numerics within 0.01) and deliberately **ignores explanation wording**.
 
-### P8 — LLM interpreter `[ ]`
+*Verified:* `python scripts/run_public_cases.py public_cases/sample_cases.json` → 10/10, exit 0; `--extended` → 44/44.
+The comparator is tested in both directions: it accepts every reference interpretation and reworded explanations, and
+detects a wrong type, wrong hours, an inverted factor, a flipped `applies`, and a missing entry. The runner reports a
+broken case rather than dying on it.
 
-- `[ ] T-080` Resolve O-01. `llm/base.py` protocol + `llm/providers/primary.py` adapter; exact model snapshot pinned.
-- `[ ] T-081` `llm/prompts.py` — system rules from Guide §7.1 (taxonomy, time rules, factor contrast set, reserve rule,
-  `no_op` rule, notes-are-untrusted-data), versioned by `PROMPT_VERSION`.
-- `[ ] T-082` `llm/interpreter.py` — one structured call for all notes, minimal context (D-05), refusal/truncation
-  detection, typed envelope parse.
-  *Acceptance:* interpreter tests run against recorded/mocked provider responses (no network in CI); a live smoke test
-  sits behind a separate opt-in marker.
+### P8 — LLM interpreter `[x]`
+
+- `[x] T-080` `llm/base.py` — `StructuredOutputProvider` protocol, `ProviderResponse`, and the **failure taxonomy the
+  P10 retry policy branches on** (`ProviderTimeout`, `ProviderUnavailable`, `ProviderRateLimited(retry_after)`,
+  `ModelRefusal`, `ModelTruncated`, `MalformedModelOutput`, `ProviderNotConfigured`). Two adapters —
+  `llm/providers/openai_provider.py` (Chat Completions + `json_schema` strict) and
+  `llm/providers/anthropic_provider.py` (forced tool call as a typed output channel) — behind
+  `llm/providers/__init__.build_provider()`, selected by `LLM_PROVIDER`. **O-01 is still open**: both adapters exist,
+  but no provider/model/key is pinned yet.
+- `[x] T-081` `llm/prompts.py` — system prompt (taxonomy, untrusted-data rule, one-entry-per-note, time rules, factor
+  contrast set, reserve/grid rules, relevance, never-invent) plus a provisional-policy block generated from the
+  config. `build_user_payload()` sends the battery object and the notes as escaped JSON — and **nothing else**.
+- `[x] T-082` `llm/interpreter.py` — one structured call for all notes, `parse_envelope()` for structural unwrapping,
+  `coerce_to_canonical()` as the shape gate, `build_interpreter()` factory. `llm/schema.py` builds the tagged-union
+  JSON Schema with the entry count pinned to the note count.
+- `[x]` Wired into `OptimizeService`, built once per service (pooled HTTP client), released on app shutdown via a
+  FastAPI lifespan. New config: `LLM_BASE_URL`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_TEMPERATURE`, `BACKUP_LLM_BASE_URL`.
+
+*Verified:* 48 offline tests. Prompt tests assert the contrast set verbatim, the untrusted-data clause, determinism,
+and — importantly — that the payload contains **no** `demand_kwh` / `solar_kwh` / `tariff` (D-05). Schema tests check
+all six variants, the pinned entry count, bounds, illegal combinations being unrepresentable, and a drift guard tying
+the schema's fields to the canonical Pydantic models. Both adapters are driven through `httpx.MockTransport` for 429
+(with `retry-after`), 5xx, 401, timeout, refusal, truncation, and malformed body. Full-chain integration tests run a
+stubbed provider through the real prompt, schema, compiler, solvers, canonicalizer and replay — including a
+prompt-injection note, which reaches the model as data and cannot add `battery_shutdown` to the schema.
+`tests/integration/test_live_provider.py` is the opt-in warm canary (`pytest -m live`), deselected by default.
 
 ### P9 — Deterministic guardrails `[ ]`
 
@@ -794,3 +819,34 @@ Append one entry per working session, newest last. Keep entries short and factua
     `OPEN` because that file's protocol reserves `FIXED` for confirmation in a later review pass.
 - Next session starts at `T-070`: `scripts/run_public_cases.py`, the standalone regression runner that reports
   interpretation, validity, cost gap, and latency per case.
+
+### 2026-09-18 — Session 9 (P7 + P8 — regression runner and LLM interpreter)
+
+- `T-070`, `T-080`, `T-081`, `T-082` complete. 237 tests green (2 `live` deselected), `ruff check .` clean.
+- **The pipeline is now complete end to end.** With a stubbed provider, a public case goes request → model → shape
+  gate → compiler → solvers → canonicalizer → replay → 200, at the published optimal cost. Only the guardrail
+  classification (P9) and the retry policy (P10) are missing between the model and the compiler.
+- P7 reuses everything: the runner calls the P6 service, replays with P2, and compares interpretations with a new
+  comparator that checks what the organizers check and ignores explanation wording. One runner serves both the
+  offline optimizer regression and (via `--endpoint`) the live LLM path P11/P16 will need.
+- **O-01 deliberately left open.** No credentials exist in this environment, so instead of guessing a provider I built
+  two adapters — OpenAI-compatible and Anthropic — behind one protocol, selected by `LLM_PROVIDER`. That also gives
+  O-02's backup seam for free. Pinning the exact model snapshot is a config change plus a `pytest -m live` run.
+- **Failure classes are modelled as types, not strings**, because P10 must branch on them: a 429 carries its
+  `retry_after`, a refusal is not malformed output, a timeout is not a 5xx. Every one is covered offline with
+  `httpx.MockTransport`, so the retry policy can be built against tested behaviour rather than assumptions.
+- The prompt is contrastive by design: the two expensive errors are the `by`/`to` factor inversion and the
+  end-exclusive window boundary, and both are shown as explicit contrasts rather than described. Provisional
+  spec-gap policies are generated from config, so an organizer clarification changes the prompt through a setting.
+- **D-05 is now enforced by test, not just by intent**: the payload must contain no `demand_kwh`, `solar_kwh`, or
+  `tariff`. Sending the 24-hour matrix would cost tokens and latency and invite the model to copy an unrelated
+  number into a directive.
+- Prompt injection is handled structurally rather than by filtering: notes are JSON-escaped values inside a delimited
+  data block, the system prompt states they cannot change the rules, and the schema simply has no variant for an
+  invented directive type. A test asserts an injected note cannot widen the schema.
+- Anthropic returning prose instead of the forced tool call is classified as `ModelRefusal`, not malformed output —
+  the model declined; it did not emit broken JSON. That routing matters in P10.
+- Live smoke test added behind `-m live` and excluded from default runs, so CI stays offline and free.
+- Next session starts at `T-090`/`T-091`: the deterministic guardrails that replace `coerce_to_canonical`'s shape gate
+  with classified checks (count, note_index coverage, hours, applies semantics, reserve-vs-capacity, finiteness) plus
+  the narrow safe normalizations — and nothing else.

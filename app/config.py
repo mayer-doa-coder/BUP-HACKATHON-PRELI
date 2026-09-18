@@ -56,14 +56,20 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     llm_model: str = ""
     llm_api_key: SecretStr = SecretStr("")
+    # Blank means "use the provider adapter's own default host"; set it for a gateway or proxy.
+    llm_base_url: str = ""
     llm_attempt_timeout_seconds: float = 3.2
     llm_max_attempts: int = 2
+    llm_max_output_tokens: int = 2048
+    # None omits the parameter entirely, for models that reject an explicit temperature.
+    llm_temperature: float | None = 0.0
     prompt_version: str = "gridwise-parser-v1"
     schema_version: str = "gridwise-directives-v1"
 
     backup_llm_provider: str = ""
     backup_llm_model: str = ""
     backup_llm_api_key: SecretStr = SecretStr("")
+    backup_llm_base_url: str = ""
 
     # ----------------------------------------------------------------- budgets
     # Soft budget is the full-credit performance target; the hard deadline only exists so
