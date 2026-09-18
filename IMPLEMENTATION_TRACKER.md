@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P15 COMPLETE — awaiting approval to start P16`
+**Status:** `P17 + P18 COMPLETE (P16 deployment delegated) — awaiting approval to start P19`
 **Last updated:** 2026-09-18
-**Current phase:** P16 (Docker already done in session 11; deployment remains)
-**Next action:** `T-162` (deploy and verify from an external network)
+**Current phase:** P19 (not started)
+**Next action:** `T-190` (CI pipeline)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P16 — Deployment (Docker done, deploy pending) |
-| Last completed task | `T-151` (P15 complete) |
-| Next task | `T-162` |
-| Tests passing | 441 / 441 (+2 `live` deselected), `ruff check .` clean |
+| Phase | P19 — CI (not started) |
+| Last completed task | `T-180` (P17 + P18 complete) |
+| Next task | `T-190` |
+| Tests passing | 458 / 458 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
 | Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
@@ -263,11 +263,12 @@ app/
 [x] observability/logging.py    [x] observability/metrics.py  [x] observability/trace.py
 [x] observability/record.py
 [x] cache/request_cache.py
-[ ] demo/routes.py              [ ] demo/models.py
+[x] demo/routes.py              [x] demo/models.py   [x] demo/service.py   [x] demo/page.py
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
 tests/   unit/ integration/ regression/ security/ property/
-scripts/ [x] run_public_cases.py  [ ] benchmark_latency.py  [x] verify_docker.py  [x] paraphrase_eval.py
+scripts/ [x] run_public_cases.py  [x] benchmark_latency.py  [x] verify_docker.py  [x] paraphrase_eval.py
+         [x] warm_canary.py
          [x] verify_solver.py  [x] healthcheck.py  [x] semantic_corpus.py
 public_cases/sample_cases.json   # copied from docs/, never edited
 ```
@@ -646,18 +647,38 @@ validator status, versions), and a failure stamps its code.
 - `[ ] T-162` Deploy to the chosen platform (O-03); verify both endpoints from an external network; push an immutable
   tag/digest to the registry (O-04).
 
-### P17 — Warm canary & latency `[ ]`
+### P17 — Warm canary & latency `[x]`
 
-- `[ ] T-170` Pre-judging canary against the exact production model + prompt version + schema version (separate from
-  `/health`, which must never call the provider).
-- `[ ] T-171` `scripts/benchmark_latency.py` — external p50/p95/p99. Target p95 ≤ 4.5 s.
+- `[x] T-170` `scripts/warm_canary.py` — runs the exact production model, prompt version and schema version against
+  three canary cases (the percentage-direction contrast, a window, a `no_op` distractor), checks credentials, schema
+  parsing, guardrails **and** semantics, reports cold-vs-warm latency, and prints the release record to freeze.
+  Separate from `/health` by design.
+- `[x] T-171` `scripts/benchmark_latency.py` — external p50/p95/p99 with warm-up, optional concurrency, failure
+  reporting, and the result mapped onto the rubric's latency bands (≤5 s = 3/3).
 
-### P18 — Demo layer `[ ]`
+*Verified against the real configured model:* the canary **passes** — all three cases correct, warm p95 **1.9 s**
+against a 4.5 s budget. It also proved its worth immediately by catching two real defects (see the session log).
 
-- `[ ] T-180` `demo/` routes behind `DEMO_MODE`: pipeline trace, 24 h energy chart, constraint bands, validation proof,
-  cost comparison (label an infeasible no-storage baseline as infeasible rather than forcing the comparison),
-  active-constraint inspector, what-if lab, paraphrase lab, public-case runner, request replay.
-  *Constraint:* zero effect on `/optimize-energy`'s schema or latency.
+### P18 — Demo layer `[x]`
+
+- `[x] T-180` `demo/models.py` (demo-only types, never the canonical ones), `demo/service.py` (builds the views from
+  a **real** pipeline run), `demo/routes.py` (`/demo`, `/demo/analyze`, `/demo/what-if`, `/demo/paraphrase`,
+  `/demo/public-cases`, `/demo/config`, `/demo/sample-scenario`), `demo/page.py` (a self-contained dashboard).
+  Covers the pipeline trace, 24-hour chart, constraint bands, validation proof, active-constraint inspector,
+  honest cost comparison, what-if lab, paraphrase lab and the public-case runner.
+
+*Verified:* 17 tests. The judged contract is unchanged with the demo enabled — same seven fields, same cost — and the
+demo's numbers are asserted to **equal** the canonical response rather than being recomputed. Demo routes are absent
+by default, stay out of the OpenAPI document, and the page is asserted to reference no CDN.
+
+> **Gating uses both flags, deliberately.** Demo routes need `DEMO_MODE=true` **and** `JUDGE_MODE=false`, so a
+> deployment that accidentally ships with `DEMO_MODE` set still exposes nothing to the judge. A warning is logged if
+> `DEMO_MODE` is on while `JUDGE_MODE` is too, so the combination is never silently ignored. This finally gives both
+> P0 flags a purpose.
+
+> **The dashboard has no CDN dependency.** Charts are inline SVG drawn from the same JSON the API returns, because a
+> container may have no outbound internet and a demo that loses its chart library in front of a reviewer is worse
+> than no demo.
 
 ### P19 — CI `[ ]`
 
@@ -1081,3 +1102,37 @@ Append one entry per working session, newest last. Keep entries short and factua
 - Next session is the rest of P16: `T-162`, deploying and verifying from an external network. The image, compose file,
   `DOCKER.md` and `verify_docker.py` already exist from session 11. **O-01 (provider + pinned model snapshot) and
   O-03 (hosting platform) are the remaining blockers.**
+
+### 2026-09-18 — Session 14 (P17 + P18; P16 deployment delegated)
+
+- P16's remaining task (`T-162`, deploy) is **delegated to a teammate** at the user's request; the Docker artefacts
+  from session 11 are what they need. `T-170`, `T-171` and `T-180` are complete. 458 tests green, `ruff` clean.
+- **O-01 is effectively resolved:** provider `openai`, model `gpt-5.6-luna`. The warm canary passes against it —
+  all three canary cases correct, warm p95 **1.9 s** against the 4.5 s budget — and a full `/demo/analyze` on
+  SAMPLE-01 returned the published ground-truth directive (`solar_reduction [12,13] factor 0.25`) and the exact
+  published optimum (38365.0), replay clean and proven optimal.
+- **The canary earned its keep immediately by finding two real defects:**
+  1. `temperature=0.0` is rejected by this model (`only the default (1) is supported`), so every call returned 400.
+     The adapter was discarding the provider's error body, making it undiagnosable; it now surfaces the safe error
+     *metadata* (`type`, `code`, `param`, truncated message), which is what named the problem. API clients still see
+     only a sanitized 500.
+  2. Worse: `.env.example` documented "leave blank to omit" for `LLM_TEMPERATURE`, and **a blank value crashed the
+     service at startup** — an empty env string is not a valid `float | None`. The documented escape hatch was a
+     landmine. Fixed with a `mode="before"` validator that treats blank/`none`/`null`/`default` as `None`.
+     The user's local `.env` was updated accordingly (one line; backup at `.env.bak`).
+- Also fixed a loop-lifetime bug in the canary: closing the provider's pooled client in a second `asyncio.run` raised
+  "Event loop is closed". The client belongs to the loop that created it.
+- **A test-hygiene bug that had become a real one:** with credentials present in `.env`, the default `OptimizeService`
+  built a *live* interpreter, so the ordinary test suite was making billable provider calls and its results depended
+  on whose machine it ran on. `tests/conftest.py` now clears provider credentials at import time; the live checks
+  opt back in with `GRIDWISE_TEST_ALLOW_LIVE=1`.
+- P18 gating uses **both** P0 flags: `DEMO_MODE=true` *and* `JUDGE_MODE=false`. A deployment that accidentally ships
+  with `DEMO_MODE` set still exposes nothing, and a warning is logged so the combination is never silently ignored.
+- The demo reads the artefacts earlier phases already produce — P3's `ConstraintTrace` provenance, P5's solver
+  statuses, P2's replay residuals — rather than recomputing them. A demo with its own arithmetic could show a
+  convincing story while the judged path did something else. A test asserts the demo's numbers equal the canonical
+  response exactly.
+- The no-storage cost comparison is **labelled infeasible** when a grid cap makes it impossible, rather than quoting a
+  saving against a plan nobody could legally run.
+- Next session starts at `T-190`: the CI pipeline. Note for it — CI must run with credentials absent (the conftest
+  guard makes that the default) and must not depend on `docs/` fixtures being present in a slim checkout.

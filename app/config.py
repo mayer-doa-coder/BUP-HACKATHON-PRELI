@@ -125,6 +125,21 @@ class Settings(BaseSettings):
     log_raw_operator_notes: bool = False
     log_llm_raw_output: bool = False
 
+    @field_validator("llm_temperature", mode="before")
+    @classmethod
+    def _optional_temperature(cls, value: object) -> object:
+        """Treat a blank value as "omit the parameter".
+
+        ``.env`` files have no way to express ``None``; an unset key is an empty string. Without
+        this, the documented way to disable an explicit temperature — leaving it blank — would
+        fail validation and the service would refuse to start. That matters because several
+        current models reject any explicit temperature and accept only their default, so blanking
+        this is the fix for a real provider 400.
+        """
+        if isinstance(value, str) and value.strip().lower() in ("", "none", "null", "default"):
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:

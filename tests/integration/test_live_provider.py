@@ -5,7 +5,10 @@ on a third party being up. Run it deliberately before judging, as the warm canar
 Guide §7.4 — it is the only test that proves the credentials, quota, and the structured-output
 schema all work together against the *exact* production model.
 
-    pytest -m live tests/integration/test_live_provider.py
+    GRIDWISE_TEST_ALLOW_LIVE=1 pytest -m live tests/integration/test_live_provider.py
+
+The flag is required because ``conftest.py`` clears provider credentials for every other run,
+so an ordinary ``pytest`` can never make a billable call by accident.
 """
 
 from __future__ import annotations

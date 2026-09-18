@@ -7,11 +7,30 @@ fixture can never drift from the case it claims to represent.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+
+# ---------------------------------------------------------------------------------------
+# Keep the suite hermetic and free.
+#
+# A developer's local ``.env`` carries real credentials, and without this the default service
+# would build a live interpreter: tests would make billable provider calls, and results would
+# depend on whose machine they ran on. Cleared here, at import time, before any test module
+# imports the app (``app.api.routes`` builds a service at module scope).
+#
+# The opt-in live checks re-enable it explicitly:
+#     GRIDWISE_TEST_ALLOW_LIVE=1 pytest -m live
+# ---------------------------------------------------------------------------------------
+if os.environ.get("GRIDWISE_TEST_ALLOW_LIVE") != "1":
+    os.environ["LLM_MODEL"] = ""
+    os.environ["LLM_API_KEY"] = ""
+    os.environ["BACKUP_LLM_PROVIDER"] = ""
+    os.environ["BACKUP_LLM_MODEL"] = ""
+    os.environ["BACKUP_LLM_API_KEY"] = ""
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
