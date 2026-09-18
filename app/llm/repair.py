@@ -34,6 +34,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from app.cache.request_cache import TtlLruCache, build_cache, parser_cache_key
 from app.config import Settings, get_settings
 from app.guardrails.directive_validator import GuardrailReport, validate_directives
 from app.llm.base import (
@@ -50,6 +51,8 @@ from app.llm.prompts import (
     build_feasibility_repair_note,
     build_schema_repair_note,
     build_semantic_repair_note,
+    build_system_prompt,
+    build_user_payload,
 )
 from app.schemas.directive import DirectiveInterpretation
 from app.schemas.request import OptimizeRequest
@@ -103,6 +106,7 @@ class InterpretationRun:
     used_backup: bool = False
     failure_codes: list[str] = field(default_factory=list)
     last_error: str = ""
+    cache_hit: bool = False
 
 
 class InterpretationRunner:
@@ -113,14 +117,48 @@ class InterpretationRunner:
         interpreter: LlmDirectiveInterpreter,
         settings: Settings | None = None,
         backup: LlmDirectiveInterpreter | None = None,
+        cache: TtlLruCache | None = None,
     ) -> None:
         self._interpreter = interpreter
         self._settings = settings or get_settings()
         self._backup = backup
+        self._cache = cache if cache is not None else build_cache(self._settings)
+        # Separate from the request-level limit: the provider has its own quota and rate limits,
+        # and a burst of judge traffic must not turn into a burst of 429s.
+        self._llm_slots = asyncio.Semaphore(max(1, self._settings.max_concurrent_llm_calls))
+
+    @property
+    def cache_stats(self):
+        return self._cache.stats
+
+    def cache_key_for(self, request: OptimizeRequest) -> str:
+        """The parser cache key for this request, derived from the prompt it would send."""
+        return parser_cache_key(
+            system_prompt=build_system_prompt(self._settings),
+            user_payload=build_user_payload(request),
+            settings=self._settings,
+            provider=self._interpreter.provider_name,
+            model=self._settings.llm_model,
+        )
+
+    def remember(self, request: OptimizeRequest, directives: list[DirectiveInterpretation]) -> None:
+        """Store a guardrail-validated interpretation against this request's prompt."""
+        self._cache.set(self.cache_key_for(request), list(directives))
 
     async def run(self, request: OptimizeRequest, deadline: Deadline) -> InterpretationRun:
         """Interpret the notes, repairing once if the first attempt is unusable."""
         run = InterpretationRun(provider=self._interpreter.provider_name)
+
+        cache_key = self.cache_key_for(request)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            # Only guardrail-validated interpretations are ever stored, so a hit is as
+            # trustworthy as a fresh call — and costs no provider quota.
+            run.ok = True
+            run.cache_hit = True
+            run.directives = list(cached)
+            return run
+
         max_attempts = max(1, self._settings.llm_max_attempts)
 
         repair_note: str | None = None
@@ -132,11 +170,12 @@ class InterpretationRunner:
 
             run.attempts += 1
             try:
-                outcome = await interpreter.interpret(
-                    request,
-                    timeout_s=deadline.timeout_for(self._settings.llm_attempt_timeout_seconds),
-                    repair_note=repair_note,
-                )
+                async with self._llm_slots:
+                    outcome = await interpreter.interpret(
+                        request,
+                        timeout_s=deadline.timeout_for(self._settings.llm_attempt_timeout_seconds),
+                        repair_note=repair_note,
+                    )
             except InterpreterError as exc:
                 decision = self._decide_after_provider_error(exc, deadline, run)
                 if decision is None:
@@ -156,6 +195,8 @@ class InterpretationRunner:
             if report.ok:
                 run.ok = True
                 run.directives = report.directives
+                # Cached only after the guardrails accepted it — never raw model output.
+                self._cache.set(cache_key, list(report.directives))
                 return run
 
             run.failure_codes = [str(code) for code in report.codes]
@@ -187,11 +228,14 @@ class InterpretationRunner:
         run.attempts += 1
         run.repairs.append(RepairReason.FEASIBILITY)
         try:
-            outcome = await self._interpreter.interpret(
-                request,
-                timeout_s=deadline.timeout_for(self._settings.llm_attempt_timeout_seconds),
-                repair_note=build_feasibility_repair_note(),
-            )
+            # Deliberately does not consult the cache: the cached entry is the interpretation
+            # that just proved infeasible, so reusing it would defeat the whole retry.
+            async with self._llm_slots:
+                outcome = await self._interpreter.interpret(
+                    request,
+                    timeout_s=deadline.timeout_for(self._settings.llm_attempt_timeout_seconds),
+                    repair_note=build_feasibility_repair_note(),
+                )
         except InterpreterError as exc:
             run.last_error = type(exc).__name__
             return run

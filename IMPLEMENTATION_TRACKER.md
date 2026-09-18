@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P11 + P12 + P13 COMPLETE, Docker pulled forward — awaiting approval to start P14`
+**Status:** `P0-P18 COMPLETE (P19 dropped; P16 deploy + P20 docs/video delegated)`
 **Last updated:** 2026-09-18
-**Current phase:** P14 (not started)
-**Next action:** `T-140` (cache, budgets, resource protection)
+**Current phase:** P20 — teammates own the README and video; `T-202` release freeze remains
+**Next action:** verify the deployed endpoint, then freeze versions (`T-202`)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P14 — Cache, budgets, resource protection (not started) |
-| Last completed task | `T-131` (P11-P13 complete; P16 Docker pulled forward) |
-| Next task | `T-140` |
-| Tests passing | 366 / 366 (+2 `live` deselected), `ruff check .` clean |
+| Phase | P20 — Docs, video, release freeze (owned by teammates) |
+| Last completed task | `T-180` (P17 + P18 complete; P19 dropped) |
+| Next task | `T-202` (release freeze) — `T-200`/`T-201` are with teammates |
+| Tests passing | 458 / 458 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
 | Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
@@ -260,13 +260,15 @@ app/
 [x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [x] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py   [x] services/plan_summary.py   [x] services/deadline.py
-[ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
-[ ] cache/request_cache.py
-[ ] demo/routes.py              [ ] demo/models.py
+[x] observability/logging.py    [x] observability/metrics.py  [x] observability/trace.py
+[x] observability/record.py
+[x] cache/request_cache.py
+[x] demo/routes.py              [x] demo/models.py   [x] demo/service.py   [x] demo/page.py
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
 tests/   unit/ integration/ regression/ security/ property/
-scripts/ [x] run_public_cases.py  [ ] benchmark_latency.py  [x] verify_docker.py  [x] paraphrase_eval.py
+scripts/ [x] run_public_cases.py  [x] benchmark_latency.py  [x] verify_docker.py  [x] paraphrase_eval.py
+         [x] warm_canary.py
          [x] verify_solver.py  [x] healthcheck.py  [x] semantic_corpus.py
 public_cases/sample_cases.json   # copied from docs/, never edited
 ```
@@ -583,19 +585,53 @@ simply does not apply — a lesson carried over from P5.
 > the optimal cost, which is impossible for nested feasible sets. Now pinned to exact optimality with
 > `MILP_RELATIVE_GAP=0.0`, with a regression test asserting `mip_gap == 0` and MILP == LP bound.
 
-### P14 — Cache, budgets, resource protection `[ ]`
+### P14 — Cache, budgets, resource protection `[x]`
 
-- `[ ] T-140` `cache/request_cache.py` — parser cache keyed on notes + battery context + provider + exact model +
-  `PROMPT_VERSION` + `SCHEMA_VERSION`; full-response cache additionally on the canonical request + `OPTIMIZER_VERSION` +
-  commit SHA. Cache only guardrail-valid interpretations and replay-valid responses.
-- `[ ] T-141` Deadlines (4.5 s soft / 28 s hard), body-size and note-length limits, request and LLM concurrency semaphores.
-  *Acceptance:* the "same note, different battery capacity" collision test must miss the cache, not hit it.
+- `[x] T-140` `cache/request_cache.py` — `TtlLruCache` (bounded LRU + TTL, lock-guarded, disabled cleanly at size 0),
+  `parser_cache_key()`, `response_cache_key()`, `canonical_request_json()`. **The parser key hashes the literal
+  prompt text** rather than a hand-listed set of fields, so every battery field, the note wording, the note order and
+  any prompt edit necessarily change it — a field cannot be forgotten. Versions are hashed separately so a
+  `PROMPT_VERSION` bump invalidates even when the rendered text is unchanged. Segments are length-prefixed, so
+  `("ab","c")` and `("a","bc")` cannot collide.
+- `[x] T-141` `ConcurrencyLimitMiddleware` — request-level semaphore that **queues rather than rejects**, plus a
+  separate LLM semaphore inside `InterpretationRunner` (the provider has its own quota). `/health` bypasses the gate
+  entirely. The middleware **starts the `Deadline` before queueing** and the route passes it into the service, so time
+  spent waiting counts against the same 30 s the judge allows; a slot that cannot be had in budget yields a controlled
+  503 `service_busy`. Body-size and note-length limits were already in place from P1.
 
-### P15 — Observability `[ ]`
+*Verified:* 42 tests. Key correctness is the bulk of it: **all five** battery fields change the parser key (not just
+capacity — all five reach the prompt), as do note text, note order, provider, model, prompt and schema versions, and a
+prompt edit made *without* a version bump. The 24-hour matrix correctly does **not** affect the parser key (it never
+reaches the model), while `scenario_id` and tariffs **do** affect the response key, and shuffled hours do not. Nothing
+invalid is ever cached: guardrail failures, provider outages and infeasible interpretations all leave both caches
+empty. A corrected interpretation from the feasibility repair replaces the cached one. LLM concurrency is capped
+(peak ≤ 2 under 6 parallel requests), `/health` answers while the optimizer is saturated, and a saturated service
+returns 503 rather than overrunning the timeout.
 
-- `[ ] T-150` Structured JSON logging with correlation IDs and the field list in Guide §23. Raw notes, prompts, provider
-  payloads, and secrets are never logged at INFO.
-- `[ ] T-151` Prometheus-style counters and histograms (Guide §23 metric list).
+### P15 — Observability `[x]`
+
+- `[x] T-150` `observability/logging.py` — `JsonLogFormatter` (one JSON object per line, `extra` fields merged),
+  a **context-local** correlation ID, `QuietThirdPartyFilter`, and `redact_note()` / `redact_model_output()` which
+  finally honour the `LOG_RAW_OPERATOR_NOTES` / `LOG_LLM_RAW_OUTPUT` flags defined back in P0 and unused until now.
+  Replaces P1's `logging.basicConfig` placeholder.
+- `[x] T-151` `observability/metrics.py` — a small Prometheus-compatible registry (Counter / Gauge / Histogram plus
+  text exposition) covering the Guide §23 list, with `/metrics` on a **separate router** gated by `METRICS_ENABLED`.
+  `observability/record.py` is the single bridge from pipeline results to trace and metrics;
+  `observability/trace.py` holds the per-request `RequestTrace`.
+
+*Verified:* 33 tests. Leak checks first: a note is redacted to a stable hash plus length, model output likewise, a
+traceback never reaches a log line, and a full request's logs are asserted to contain none of its note text. Metrics
+are proven to actually move under real traffic (request counters by status, duration histograms, LP/MILP timers, cache
+hit/miss), the active gauge returns to zero, `/metrics` exposes the registry, and it can be switched off. The trace is
+asserted to carry the Guide §23 diagnostics end to end (provider, model version, attempts, all three solver statuses,
+validator status, versions), and a failure stamps its code.
+
+> **No new dependency.** `prometheus_client` is not installed, and adding a package for three metric types would mean
+> another wheel to pin and re-verify inside the image. The text exposition format is stable and the registry is ~120
+> lines, so this stays swappable if that trade ever changes.
+
+> **Latency buckets are chosen around the scored thresholds** — 4.5 s (internal target) and 5 s (full-credit cutoff)
+> are explicit bucket bounds, so p95 reads against the rubric directly instead of being interpolated.
 
 ### P16 — Docker & deployment `[ ]`
 
@@ -611,23 +647,47 @@ simply does not apply — a lesson carried over from P5.
 - `[ ] T-162` Deploy to the chosen platform (O-03); verify both endpoints from an external network; push an immutable
   tag/digest to the registry (O-04).
 
-### P17 — Warm canary & latency `[ ]`
+### P17 — Warm canary & latency `[x]`
 
-- `[ ] T-170` Pre-judging canary against the exact production model + prompt version + schema version (separate from
-  `/health`, which must never call the provider).
-- `[ ] T-171` `scripts/benchmark_latency.py` — external p50/p95/p99. Target p95 ≤ 4.5 s.
+- `[x] T-170` `scripts/warm_canary.py` — runs the exact production model, prompt version and schema version against
+  three canary cases (the percentage-direction contrast, a window, a `no_op` distractor), checks credentials, schema
+  parsing, guardrails **and** semantics, reports cold-vs-warm latency, and prints the release record to freeze.
+  Separate from `/health` by design.
+- `[x] T-171` `scripts/benchmark_latency.py` — external p50/p95/p99 with warm-up, optional concurrency, failure
+  reporting, and the result mapped onto the rubric's latency bands (≤5 s = 3/3).
 
-### P18 — Demo layer `[ ]`
+*Verified against the real configured model:* the canary **passes** — all three cases correct, warm p95 **1.9 s**
+against a 4.5 s budget. It also proved its worth immediately by catching two real defects (see the session log).
 
-- `[ ] T-180` `demo/` routes behind `DEMO_MODE`: pipeline trace, 24 h energy chart, constraint bands, validation proof,
-  cost comparison (label an infeasible no-storage baseline as infeasible rather than forcing the comparison),
-  active-constraint inspector, what-if lab, paraphrase lab, public-case runner, request replay.
-  *Constraint:* zero effect on `/optimize-energy`'s schema or latency.
+### P18 — Demo layer `[x]`
 
-### P19 — CI `[ ]`
+- `[x] T-180` `demo/models.py` (demo-only types, never the canonical ones), `demo/service.py` (builds the views from
+  a **real** pipeline run), `demo/routes.py` (`/demo`, `/demo/analyze`, `/demo/what-if`, `/demo/paraphrase`,
+  `/demo/public-cases`, `/demo/config`, `/demo/sample-scenario`), `demo/page.py` (a self-contained dashboard).
+  Covers the pipeline trace, 24-hour chart, constraint bands, validation proof, active-constraint inspector,
+  honest cost comparison, what-if lab, paraphrase lab and the public-case runner.
 
-- `[ ] T-190` GitHub Actions per Guide §33: ruff → types → unit → property/metamorphic → public integration → adversarial
-  fixtures → API contract → secret scan → docker build → run container → `/health` → one full optimize → replay PASS.
+*Verified:* 17 tests. The judged contract is unchanged with the demo enabled — same seven fields, same cost — and the
+demo's numbers are asserted to **equal** the canonical response rather than being recomputed. Demo routes are absent
+by default, stay out of the OpenAPI document, and the page is asserted to reference no CDN.
+
+> **Gating uses both flags, deliberately.** Demo routes need `DEMO_MODE=true` **and** `JUDGE_MODE=false`, so a
+> deployment that accidentally ships with `DEMO_MODE` set still exposes nothing to the judge. A warning is logged if
+> `DEMO_MODE` is on while `JUDGE_MODE` is too, so the combination is never silently ignored. This finally gives both
+> P0 flags a purpose.
+
+> **The dashboard has no CDN dependency.** Charts are inline SVG drawn from the same JSON the API returns, because a
+> container may have no outbound internet and a demo that loses its chart library in front of a reviewer is worse
+> than no demo.
+
+### P19 — CI `[-]` DROPPED
+
+- `[-] T-190` GitHub Actions. **Dropped at the user's request (session 15); not deferred.**
+  The checks the pipeline would have run all exist and are runnable locally, so nothing is lost but the automation:
+  `ruff check .`, `pytest` (458 tests), `python scripts/run_public_cases.py`, `python scripts/verify_docker.py`,
+  `python scripts/warm_canary.py`. Re-adding CI later means wiring those five commands into a workflow file — no
+  code changes. Guide §33 lists CI as recommended, not as a scored requirement; the rubric scores the endpoint,
+  the artefacts and the documentation.
 
 ### P20 — Docs, video, release freeze `[ ]`
 
@@ -991,3 +1051,114 @@ Append one entry per working session, newest last. Keep entries short and factua
   and dropping a real directive because it looked suspicious would lose the case. Defence is structural instead.
 - Next session starts at `T-140`: parser/response caching with version-aware keys, request budgets, and concurrency
   limits. **O-01 (provider + pinned model) is now the main blocker** for live semantic accuracy and deployment.
+
+### 2026-09-18 — Session 12 (P14 — caching, budgets, concurrency)
+
+- `T-140`/`T-141` complete. 408 tests green (2 `live` deselected), `ruff check .` clean, regression 10/10.
+- **The parser cache key hashes the prompt text itself.** Guide §21 says to include "relevant battery context", but I
+  checked what the prompt actually carries and it is *all five* battery fields, not just capacity. Enumerating them by
+  hand is a bug waiting to happen — add a field to the prompt later and the key silently stops covering it. Hashing
+  the rendered prompt makes the key correct by construction, and it also catches a prompt edit that shipped without a
+  `PROMPT_VERSION` bump. Versions are still hashed separately so an explicit bump invalidates regardless.
+- Deliberate asymmetry between the two caches, and it is worth understanding before changing either: the **parser**
+  key ignores the 24-hour matrix (it never reaches the model, so two scenarios with identical notes and battery share
+  an interpretation), while the **response** key covers the whole scenario including `scenario_id` and tariffs. A test
+  pins each half, because collapsing them either way is a real bug — sharing a response across scenario ids would
+  echo the wrong id.
+- Nothing invalid is ever cached: the parser stores only post-guardrail interpretations, the response cache only
+  post-replay responses. Guardrail failures, provider outages and infeasible interpretations all leave both empty,
+  each asserted. A successful feasibility repair **overwrites** the cached interpretation, so a repeat request does
+  not pay for the same reparse twice.
+- **The concurrency gate queues rather than rejects**, and `/health` bypasses it completely. Rejecting judge traffic
+  to protect the provider would be trading a scored requirement for an unscored one, and a health probe stuck behind a
+  saturated optimizer would make the platform restart a perfectly healthy instance.
+- The `Deadline` now starts in the middleware, *before* queueing, and flows through the route into the service. Had it
+  started after the wait, a queued request could have taken its full 28 s of work on top of an unknown wait and blown
+  the organizer's 30 s limit.
+- One test of mine was wrong, not the code: I varied the note *count* while the canned provider answer still had two
+  entries, so the guardrail correctly rejected it. Fixed the fixture to vary wording while keeping one entry per note.
+- Next session starts at `T-150`/`T-151`: structured JSON logging with correlation IDs and the Guide §23 field list,
+  plus Prometheus-style counters and histograms. Telemetry the layers below already collect —
+  `InterpretationRun` (attempts, repairs, cache_hit, model version), `SolveOutcome`, `ValidationReport`, and both
+  `CacheStats` — is waiting to be surfaced.
+
+### 2026-09-18 — Session 13 (P15 — observability)
+
+- `T-150`/`T-151` complete. 441 tests green (2 `live` deselected), `ruff check .` clean, regression 10/10.
+- Checked for collisions before writing anything, and found five: P1's `logging.basicConfig` placeholder, the two
+  `LOG_RAW_*` flags defined in P0 and never used, `extra=` log fields in `errors.py` and `repair.py` that a plain
+  formatter silently discards, and no `prometheus_client` in the pinned dependency set.
+- **A latent concurrency bug from P10 was fixed, not built upon.** `OptimizeService._last_run` stored per-request
+  telemetry on a *process-wide singleton*, so two concurrent requests would overwrite each other's diagnostics.
+  Harmless while nothing read it — but P15's whole job is reading it. Replaced with a context-local `RequestTrace`
+  (context variables are task-local under asyncio), and a test runs two overlapping requests to prove the traces stay
+  separate. `last_run` was removed rather than left as a racy convenience.
+- The correlation ID travels in a `ContextVar` rather than through every function signature, so a line logged deep in
+  the optimizer still carries the right request's ID.
+- **Third-party log quieting is prefix-based, and that mattered:** the installed client registers as `httpx2`, which
+  an exact-name list missed entirely — the first smoke test was still full of per-request httpx lines. It is now a
+  handler filter, so loggers created *after* configuration are covered too.
+- Deliberately no new dependency for metrics. A ~120-line registry beats another wheel to pin, install and re-verify
+  inside the image. Latency buckets include 4.5 s and 5 s so p95 can be read straight against the rubric.
+- `/metrics` lives on its own router behind `METRICS_ENABLED` and is asserted to be switchable off: the judged
+  surface stays exactly the two endpoints the Problem Statement defines.
+- `/health` is counted in metrics but **not** trace-logged — the probe runs constantly and would drown real traffic.
+- Next session is the rest of P16: `T-162`, deploying and verifying from an external network. The image, compose file,
+  `DOCKER.md` and `verify_docker.py` already exist from session 11. **O-01 (provider + pinned model snapshot) and
+  O-03 (hosting platform) are the remaining blockers.**
+
+### 2026-09-18 — Session 14 (P17 + P18; P16 deployment delegated)
+
+- P16's remaining task (`T-162`, deploy) is **delegated to a teammate** at the user's request; the Docker artefacts
+  from session 11 are what they need. `T-170`, `T-171` and `T-180` are complete. 458 tests green, `ruff` clean.
+- **O-01 is effectively resolved:** provider `openai`, model `gpt-5.6-luna`. The warm canary passes against it —
+  all three canary cases correct, warm p95 **1.9 s** against the 4.5 s budget — and a full `/demo/analyze` on
+  SAMPLE-01 returned the published ground-truth directive (`solar_reduction [12,13] factor 0.25`) and the exact
+  published optimum (38365.0), replay clean and proven optimal.
+- **The canary earned its keep immediately by finding two real defects:**
+  1. `temperature=0.0` is rejected by this model (`only the default (1) is supported`), so every call returned 400.
+     The adapter was discarding the provider's error body, making it undiagnosable; it now surfaces the safe error
+     *metadata* (`type`, `code`, `param`, truncated message), which is what named the problem. API clients still see
+     only a sanitized 500.
+  2. Worse: `.env.example` documented "leave blank to omit" for `LLM_TEMPERATURE`, and **a blank value crashed the
+     service at startup** — an empty env string is not a valid `float | None`. The documented escape hatch was a
+     landmine. Fixed with a `mode="before"` validator that treats blank/`none`/`null`/`default` as `None`.
+     The user's local `.env` was updated accordingly (one line; backup at `.env.bak`).
+- Also fixed a loop-lifetime bug in the canary: closing the provider's pooled client in a second `asyncio.run` raised
+  "Event loop is closed". The client belongs to the loop that created it.
+- **A test-hygiene bug that had become a real one:** with credentials present in `.env`, the default `OptimizeService`
+  built a *live* interpreter, so the ordinary test suite was making billable provider calls and its results depended
+  on whose machine it ran on. `tests/conftest.py` now clears provider credentials at import time; the live checks
+  opt back in with `GRIDWISE_TEST_ALLOW_LIVE=1`.
+- P18 gating uses **both** P0 flags: `DEMO_MODE=true` *and* `JUDGE_MODE=false`. A deployment that accidentally ships
+  with `DEMO_MODE` set still exposes nothing, and a warning is logged so the combination is never silently ignored.
+- The demo reads the artefacts earlier phases already produce — P3's `ConstraintTrace` provenance, P5's solver
+  statuses, P2's replay residuals — rather than recomputing them. A demo with its own arithmetic could show a
+  convincing story while the judged path did something else. A test asserts the demo's numbers equal the canonical
+  response exactly.
+- The no-storage cost comparison is **labelled infeasible** when a grid cap makes it impossible, rather than quoting a
+  saving against a plan nobody could legally run.
+- P19 (CI) is **dropped** at the user's request; the checks it would have automated all run locally.
+
+### 2026-09-18 — Session 15 (P19 dropped; full P0-P18 verification)
+
+- **P19 dropped, not deferred.** Every check the workflow would have run exists as a local command:
+  `ruff check .`, `pytest`, `run_public_cases.py`, `verify_docker.py`, `warm_canary.py`. Guide §33 lists CI as
+  recommended; the rubric scores the endpoint, the artefacts and the documentation, none of which need a workflow.
+- **Audited P0-P18 against disk rather than against this file.** All 50 manifest entries exist. 19 acceptance
+  criteria re-checked directly in one pass: reference responses parse, 44 plans replay clean at 1e-9, compiler and
+  independent envelope agree on 44 cases, 44 cases reach the published optimum with optimality proven, responses
+  build and replay, the regression runner passes 10/10, the prompt carries the contrast rules and withholds the
+  24-hour matrix, the schema exposes exactly six variants, guardrails classify correctly, repair covers every failure
+  class, cache keys separate on battery, notes redact, and demo gating needs both flags. **19/19 passed.**
+- 458 tests green, `ruff` clean.
+- **End-to-end against the real model and the real endpoint: 10/10 public cases correct** — every interpretation
+  matched ground truth and every cost matched the published optimum exactly. Repeated over three uncached passes:
+  30/30 correct.
+- **Latency finding worth acting on.** The first request after start cost **8.2 s** (cold model/schema compile),
+  which alone would put p95 in the 2/3 band. Warm, uncached steady state is **p50 2.6-2.7 s, p95 3.1-3.4 s** — the
+  3/3 full-credit band. So `scripts/warm_canary.py` is not optional polish: **run it after deploy and before judging**,
+  or the first judged request pays the cold cost. This is now the single most important operational step.
+- Secret hygiene re-verified: `.env` and `.env.bak` are both git-ignored and both excluded from the Docker build
+  context; the only tracked env file is `.env.example`, which holds no values.
+- Remaining work is **P20**, owned by teammates (README, video) plus `T-202` release freeze, and the P16 deploy.

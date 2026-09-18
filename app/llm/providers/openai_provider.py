@@ -111,9 +111,45 @@ def _raise_for_status(response: httpx.Response, provider: str) -> None:
     if response.status_code >= 500:
         raise ProviderUnavailable(f"{provider} returned {response.status_code}")
     if response.status_code >= 400:
-        # 401/403/404 are configuration faults: retrying the same call cannot fix them. The
-        # status is reported without the body, which may echo request content.
-        raise ProviderUnavailable(f"{provider} rejected the request with {response.status_code}")
+        # 400/401/403/404 are configuration faults: retrying the same call cannot fix them, and
+        # without a reason they are very hard to diagnose. The provider's error *metadata*
+        # (type, code, offending parameter) is safe to surface — it describes the request shape,
+        # not its content — so it is attached here. It reaches operators and the canary; API
+        # clients still see only a sanitized 500, because 500s never expose details.
+        raise ProviderUnavailable(
+            f"{provider} rejected the request with {response.status_code}: {_error_hint(response)}"
+        )
+
+
+#: Cap on the provider's own error text, so a verbose body cannot flood a log line.
+ERROR_HINT_CHARS = 300
+
+
+def _error_hint(response: httpx.Response) -> str:
+    """Safe, useful summary of a provider error body.
+
+    ``type``, ``code`` and ``param`` describe the *shape* of the request that was rejected —
+    an unsupported parameter, an unknown model — and carry no scenario content. The message is
+    included, truncated, because it is what actually names the problem.
+    """
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError):
+        return "unparseable error body"
+
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return "no error detail"
+
+    parts = [
+        f"{key}={error[key]}"
+        for key in ("type", "code", "param")
+        if error.get(key)
+    ]
+    message = str(error.get("message") or "")[:ERROR_HINT_CHARS]
+    if message:
+        parts.append(f"message={message}")
+    return "; ".join(parts) or "no error detail"
 
 
 def _parse_body(response: httpx.Response, provider: str, model: str) -> ProviderResponse:

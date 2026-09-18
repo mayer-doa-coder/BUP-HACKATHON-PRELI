@@ -117,6 +117,8 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------ diagnostics
     app_commit_sha: str = ""
+    # Operational metrics on /metrics. Separate router, never part of the judged contract.
+    metrics_enabled: bool = True
     judge_mode: bool = True
     demo_mode: bool = False
     log_level: str = "INFO"
@@ -125,8 +127,16 @@ class Settings(BaseSettings):
 
     @field_validator("llm_temperature", mode="before")
     @classmethod
-    def _blank_temperature_means_omit(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
+    def _optional_temperature(cls, value: object) -> object:
+        """Treat a blank value as "omit the parameter".
+
+        ``.env`` files have no way to express ``None``; an unset key is an empty string. Without
+        this, the documented way to disable an explicit temperature — leaving it blank — would
+        fail validation and the service would refuse to start. That matters because several
+        current models reject any explicit temperature and accept only their default, so blanking
+        this is the fix for a real provider 400.
+        """
+        if isinstance(value, str) and value.strip().lower() in ("", "none", "null", "default"):
             return None
         return value
 

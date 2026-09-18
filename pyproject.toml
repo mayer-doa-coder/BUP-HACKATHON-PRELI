@@ -43,6 +43,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
+# An embedded HTML/JS template, not Python: wrapping its lines would corrupt the markup.
+"app/demo/page.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
