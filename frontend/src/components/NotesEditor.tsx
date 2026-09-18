@@ -24,7 +24,7 @@ export function NotesEditor({ notes, onChange }: Props) {
   return (
     <div className="field-group">
       <div className="field-group__header">
-        <label>Operator notes</label>
+        <span className="field-group__label">Operator notes</span>
         <span className="field-group__hint">
           {notes.length} / {MAX_OPERATOR_NOTES}
         </span>
@@ -32,6 +32,9 @@ export function NotesEditor({ notes, onChange }: Props) {
       {notes.map((note, index) => (
         <div className="note-row" key={index}>
           <textarea
+            id={`operator-note-${index}`}
+            name={`operator_note_${index}`}
+            aria-label={`Operator note ${index + 1}`}
             value={note}
             onChange={(event) => updateNote(index, event.target.value)}
             placeholder={`Note ${index + 1} — e.g. "No discharging between 6 and 9 PM."`}

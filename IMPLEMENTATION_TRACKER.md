@@ -752,7 +752,16 @@ The work is not done until every line here is ticked. Full mechanical list: Guid
 [ ] no secret in repo, image layers, logs, or responses
 [ ] README clean-environment reproduction succeeds
 [ ] versions recorded and frozen; video accessible
+[ ] scripts/verify_contract.py passes against the DEPLOYED URL (not just localhost)
 ```
+
+**The last gate is the submission gate.** `scripts/verify_contract.py --base-url <deployed>` is a
+black-box audit of exactly what the judge sees: one origin serving both endpoints, the exact
+`/health` body, the exact Section 10 response shape with no extra fields, the closed directive
+taxonomy, internal consistency of every number against the returned plan, the 400/422/500 error
+mapping, and the absence of any secret or stack trace in an error body. It imports nothing from
+`app`, so it cannot be fooled by a bug shared with the implementation. Exit code 0 means
+conformant.
 
 ---
 
@@ -1162,3 +1171,45 @@ Append one entry per working session, newest last. Keep entries short and factua
 - Secret hygiene re-verified: `.env` and `.env.bak` are both git-ignored and both excluded from the Docker build
   context; the only tracked env file is `.env.example`, which holds no values.
 - Remaining work is **P20**, owned by teammates (README, video) plus `T-202` release freeze, and the P16 deploy.
+
+### 2026-09-18 — Session 16 (frontend pass + two deployment-blocking config bugs)
+
+- Frontend reduced to exactly the documented surface (Problem Statement §10): `scenario_id`, `total_grid_kwh`,
+  `total_cost_bdt`, `peak_grid_kwh`, `plan_summary`, `directive_interpretation`, `hourly_plan`. The hourly chart
+  component was deleted — a chart is not a documented response field. Light-only claymorphism theme; tables fold to
+  cards below 640px via `data-label`. `npm run lint` and `npm run build` pass, browser console clean.
+- **Chased a frontend 500 that was not a frontend bug at all.** The UI showed `interpretation_unavailable` while the
+  identical request sent to `127.0.0.1:8000` returned 200. Cause: **three processes were listening on port 8000** —
+  the uvicorn dev server on `127.0.0.1` (IPv4 only), and a published Docker container on `::1`/`::`. Node resolves
+  `localhost` to IPv6 first, so the Vite proxy was forwarding every call to a stale container, not to the dev server.
+  Fixed by pinning the dev proxy default target to `http://127.0.0.1:8000` in `frontend/vite.config.ts`.
+- **Bug 1 (deployment-blocking): `LLM_TEMPERATURE=0.0` fails every request.** The pinned model answers
+  `400 unsupported_value: 'temperature' does not support 0.0 with this model` on *every* call, so the service
+  returns `interpretation_unavailable` in ~1.1 s for every scenario. `.env` had already been fixed, but the code
+  default in `app/config.py` and the value shipped in `.env.example` were both still `0.0` — so a clean deploy that
+  copies `.env.example`, or one that simply does not set the variable, breaks 100% of requests. **The default is now
+  `None` (parameter omitted), which works against every supported provider.**
+- **Bug 2 (deployment-blocking): a blank `LLM_TEMPERATURE` crashed startup in the previously built image.** The
+  `mode="before"` validator that accepts a blank value postdates that image. Consequence: **the image must be
+  rebuilt, not just restarted.** Verified by rebuilding from current source and running the public cases against the
+  container — SAMPLE-02 and SAMPLE-06 both returned the published optimum.
+- **Docker healthcheck cannot catch either bug.** It only probes `/health`, which by design makes no LLM call, so a
+  container failing every `/optimize-energy` still reports `healthy`. Treat "container healthy" as necessary, not
+  sufficient — run `scripts/run_public_cases.py` against the deployed URL before judging.
+- Raised `llm_attempt_timeout_seconds` 3.2 → 12.0. This was *not* the cause of the 500 (that was the temperature
+  bug), but 3.2 s sat below the measured 8.2 s cold call and barely above the 3.1 s warm p95, so a single slow call
+  became a timeout, a retry, and doubled latency. The per-request `Deadline` still caps it, so the 28 s hard
+  deadline is unchanged.
+- Accessibility issues cleared: three unbound `<label>` group headings became spans, and all 78 form inputs gained
+  `id`/`name`. Chrome's issues panel is now empty.
+- 458 tests green, `ruff` clean.
+- Added **`scripts/verify_contract.py`** to answer "how do we know the deployed service meets the
+  API-service requirement?" It is a black-box contract audit against a running base URL: both
+  endpoints on one origin, `/health` returning exactly `{"status":"ok"}` fast enough to be a
+  readiness probe, the exact Section 10.1/10.2/10.3 field sets with **no undocumented fields**,
+  the closed directive taxonomy, `applies`/`no_op`/`structured_adjustment` agreement, the 24-hour
+  plan replayed for balance/continuity/bounds/rate limits, totals recomputed from the plan, the
+  400 (and advisory 422) error mapping, and no secret or stack trace in any error body.
+  **279/279 checks pass against the local service across all 10 public cases.** Verified it has
+  teeth by pointing it at the broken container: it correctly failed with exit code 1 on exactly
+  the case the Docker healthcheck cannot see (`/health` fine, `/optimize-energy` 500).

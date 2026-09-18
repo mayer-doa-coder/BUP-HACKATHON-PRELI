@@ -21,14 +21,21 @@ export function BatteryEditor({ battery, onChange }: Props) {
 
   return (
     <div className="field-group">
-      <label>Battery</label>
+      {/* A group heading labels no single control, so it must not be a <label>: an unbound
+          <label> is an accessibility error, and each input below carries its own instead. */}
+      <span className="field-group__label">Battery</span>
       <div className="battery-grid">
         {FIELDS.map(([field, title, unit]) => (
           <div className="battery-field" key={field}>
-            <span className="battery-field__label">{title}</span>
+            <label className="battery-field__label" htmlFor={`battery-${field}`}>
+              {title}
+            </label>
             <div className="battery-field__input">
               <input
+                id={`battery-${field}`}
+                name={field}
                 type="number"
+                inputMode="decimal"
                 step="any"
                 value={Number.isNaN(battery[field]) ? "" : battery[field]}
                 onChange={(event) => update(field, event.target.value)}

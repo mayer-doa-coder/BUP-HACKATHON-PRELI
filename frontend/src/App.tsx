@@ -50,7 +50,8 @@ export default function App() {
         <div>
           <h1>GridWise</h1>
           <p className="page-header__subtitle">
-            LLM-assisted smart-campus energy optimizer — demo UI, not part of the judged surface.
+            Build a 24-hour scenario, send it to <code>POST /optimize-energy</code>, and read back the
+            directive interpretation and the hourly plan.
           </p>
         </div>
         <HealthBadge />

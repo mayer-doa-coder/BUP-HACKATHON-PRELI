@@ -58,11 +58,20 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     # Blank means "use the provider adapter's own default host"; set it for a gateway or proxy.
     llm_base_url: str = ""
-    llm_attempt_timeout_seconds: float = 3.2
+    # Must cover a cold provider call, not just a warm one: the first request after a
+    # deploy pays connection setup and model warm-up (measured ~8 s against the pinned
+    # model, versus ~3 s warm). A timeout tuned to the warm number turns that first
+    # request into a retry storm and then a 500 - which is exactly the request a judge
+    # sends first. The per-request Deadline still caps this by the time actually left.
+    llm_attempt_timeout_seconds: float = 12.0
     llm_max_attempts: int = 2
     llm_max_output_tokens: int = 2048
-    # None omits the parameter entirely, for models that reject an explicit temperature.
-    llm_temperature: float | None = 0.0
+    # None omits the parameter entirely. This is the default on purpose: several current
+    # models reject an explicit temperature outright (400 unsupported_value) rather than
+    # ignoring it, which fails every single interpretation call. Omitting the parameter
+    # works against every provider we support, so the safe value is the default and a
+    # deployment that simply does not set LLM_TEMPERATURE cannot break itself.
+    llm_temperature: float | None = None
     prompt_version: str = "gridwise-parser-v1"
     schema_version: str = "gridwise-directives-v1"
 

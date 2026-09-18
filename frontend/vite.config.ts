@@ -12,10 +12,17 @@ import react from "@vitejs/plugin-react";
 // `/api/*` to the real service server-side, where CORS does not apply.
 //
 // Override the target with VITE_BACKEND_URL (in .env.local) if the service
-// runs somewhere other than localhost:8000.
+// runs somewhere other than port 8000.
+//
+// The default target is 127.0.0.1, not "localhost", and that is deliberate. Node resolves
+// "localhost" to ::1 (IPv6) before 127.0.0.1, while a dev server started with
+// `uvicorn --host 127.0.0.1` listens on IPv4 only. If anything else is bound to the IPv6
+// side of the port - a published Docker container is the usual culprit - the proxy silently
+// forwards to *that* instead, and the UI shows errors coming from a service you are not
+// editing. Pinning the literal IPv4 address removes the ambiguity.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const backendTarget = env.VITE_BACKEND_URL || "http://localhost:8000";
+  const backendTarget = env.VITE_BACKEND_URL || "http://127.0.0.1:8000";
 
   return {
     plugins: [react()],
