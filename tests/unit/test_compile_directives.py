@@ -334,3 +334,27 @@ def test_compiler_does_not_import_the_replay_validator():
             imported.append(node.module)
 
     assert not [name for name in imported if name.startswith("app.validation")]
+
+
+def test_compiler_and_replay_agree_under_an_order_sensitive_policy(public_cases, monkeypatch):
+    """Regression for R1-1.
+
+    Under ``last_wins`` the two implementations must agree on what "last" means. Before the fix
+    the compiler sorted by ``note_index`` while the replay envelope trusted list order, so the
+    same directives supplied in a different order resolved to different effective solar — which
+    would have let a valid plan be rejected by its own validator.
+    """
+    monkeypatch.setenv("SOLAR_OVERLAP_POLICY", "last_wins")
+    settings = Settings(_env_file=None)
+
+    request = _request(public_cases[0])
+    first = SolarReductionDirective(note_index=0, structured_adjustment={"hours": [10], "factor": 0.8})
+    second = SolarReductionDirective(note_index=1, structured_adjustment={"hours": [10], "factor": 0.3})
+
+    for ordering in ([first, second], [second, first]):
+        compiled = compile_directives(request, ordering, settings)
+        envelope = derive_envelope(request, ordering, settings)
+
+        assert compiled.effective_solar.tolist() == pytest.approx(list(envelope.effective_solar))
+        # "Last" means the highest note_index in both, so list order cannot change the answer.
+        assert compiled.solar_factor[10] == pytest.approx(0.3)

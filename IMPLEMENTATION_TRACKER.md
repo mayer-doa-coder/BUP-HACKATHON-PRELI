@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P5 COMPLETE — awaiting approval to start P6`
+**Status:** `P6 COMPLETE — awaiting approval to start P7`
 **Last updated:** 2026-09-18
-**Current phase:** P6 (not started)
-**Next action:** `T-060` (numerical canonicalizer + response builder)
+**Current phase:** P7 (not started)
+**Next action:** `T-070` (public-case regression script)
 
 ---
 
@@ -57,11 +57,11 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P6 — Canonicalizer + response builder (not started) |
-| Last completed task | `T-052` (P5 complete) |
-| Next task | `T-060` |
-| Tests passing | 144 / 144, `ruff check .` clean |
-| Public cases passing | 0 / 10 |
+| Phase | P7 — Public-case regression (not started) |
+| Last completed task | `T-062` (P6 complete) |
+| Next task | `T-070` |
+| Tests passing | 173 / 173, `ruff check .` clean |
+| Public cases passing | 10 / 10 optimizer-path (44 / 44 incl. extended); LLM path pending P8 |
 | Endpoint deployed | no |
 | Docker image | not built |
 | README | not written |
@@ -257,9 +257,9 @@ app/
 [ ] llm/providers/primary.py    [ ] llm/providers/backup.py [ ] llm/repair.py
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
 [x] optimizer/compile_directives.py     [x] optimizer/model.py         [x] optimizer/lp_relaxation.py
-[x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [ ] optimizer/result.py
+[x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [x] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
-[x] services/optimize_service.py
+[x] services/optimize_service.py   [x] services/plan_summary.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
 [ ] cache/request_cache.py
 [ ] demo/routes.py              [ ] demo/models.py
@@ -396,14 +396,33 @@ than a traceback, and an artificially inflated LP bound trips the invariant. 144
 *Latency headroom:* baseline screen p50 3.3 ms, LP 3.0 ms, MILP 15.6 ms; worst observed baseline + hybrid total
 **39 ms** against the 4,500 ms budget. The LLM call will be the only meaningful latency cost in the pipeline.
 
-### P6 — Canonicalizer, response builder, summary `[ ]`
+### P6 — Canonicalizer, response builder, summary `[x]`
 
-- `[ ] T-060` `optimizer/result.py` — eps-canonicalize, derive one action per hour from the *magnitudes*, reconstruct
-  `E[h]` sequentially, recompute dependent grid values from the balance equation, serialize 6–8 decimals, parse back.
-- `[ ] T-061` Deterministic `plan_summary` (Guide §17) — short, and it must not claim anything the plan does not support.
-- `[ ] T-062` Wire `services/optimize_service.py`: validate → baseline LP → (LLM seam) → guardrails → compile → LP → MILP
-  → canonicalize → replay → respond. Replay failure ⇒ 500: never a retry, never a 200.
-  *Acceptance:* round-trip test — the serialized/parsed values replay PASS; a deliberately mis-rounded plan replays FAIL.
+- `[x] T-060` `optimizer/result.py` — `build_hourly_plan()`. Eps-canonicalizes, rounds **only the independent
+  decisions** (charge, discharge, solar used), then *derives* `battery_energy_after_kwh` sequentially and `grid_kwh`
+  from the balance equation, so the balance closes by construction. Rounding overshoot within
+  `BOUND_REPAIR_TOLERANCE` (1e-6) is clipped; anything larger fails closed as `SolverFailure`, as does activity in a
+  banned hour, simultaneous charge/discharge, and a schedule the response model cannot represent.
+- `[x] T-061` `services/plan_summary.py` — `build_plan_summary()`, adaptive: it does not claim the battery shifted
+  energy on a day when the battery never moved, and it counts non-relevant notes separately.
+- `[x] T-062` `services/optimize_service.py` rewritten around the real pipeline: `validate` → `screen_feasibility`
+  → `interpret` (P8 seam) → `solve_and_build`. `SolveStatus` becomes HTTP outcomes here and nowhere else
+  (`BASELINE_INFEASIBLE` → 422, `DIRECTIVE_INFEASIBLE` → new `DirectiveInfeasible` 500 until P10's reparse lands,
+  `SOLVER_FAILURE` → 500). The response is serialized, **parsed back**, and replayed before it is returned.
+
+*Verified:* all 44 reference cases build a replay-clean response at the published optimal cost — optimization quality
+ratio `min(1, optimal/team)` is **exactly 1.000000 on every case**. Corrupting the solver's own `E` or `g` blocks
+changes nothing in the response (both are re-derived); a mode flag set with a zero amount still yields `idle`; idle
+hours carry an exact `0.0`. Deterministic across repeated solves. Over HTTP with a stub interpreter the endpoint
+returns 200 with exactly the seven fields, and the parsed body replays clean. 173 tests green, `ruff check .` clean.
+
+*Latency:* screen + solve + build + replay is p50 **23.5 ms**, max 62 ms.
+
+> **The precision ladder is load-bearing, not decoration.** Rounding the independent decisions to 6 dp is enough to
+> break a valid plan when the inputs carry long decimals: the rounded battery movements stop cancelling over the day
+> and the end-of-day balance drifts ~1e-6, past the 1e-7 internal tolerance. The builder therefore tries
+> `(6, 9, None)` decimal places and keeps the first that replays clean. A regression test reproduces the failure
+> deliberately. Do not collapse the ladder to a single rung.
 
 ### P7 — Public-case optimizer regression (no LLM) `[ ]`
 
@@ -737,3 +756,41 @@ Append one entry per working session, newest last. Keep entries short and factua
 - Next session starts at `T-060`/`T-061`/`T-062`: eps-canonicalization, per-hour action derivation, sequential state
   reconstruction, 6–8 decimal serialization, parse-back, deterministic `plan_summary`, and wiring the service so the
   P2 replay validator finally guards a real response.
+
+### 2026-09-18 — Session 8 (P6 — canonicalizer, response builder, service wiring)
+
+- `T-060`/`T-061`/`T-062` complete. 173 tests green, `ruff check .` clean. Every phase since P1 is now connected: a
+  request validated by P1's schemas is screened by P5, compiled by P3, solved through P4/P5, canonicalized here, and
+  cleared by P2's replay before it can leave.
+- **The rounding trap in Guide §14 is real, and my own replay validator caught it.** Rounding each field independently
+  to 6 dp breaks a valid plan on inputs with long decimals: the rounded battery movements no longer cancel over 24
+  hours, so the end-of-day balance drifts ~1e-6 and the battery clips capacity — both past the 1e-7 internal
+  tolerance. Fixed structurally: only charge, discharge and solar-used are rounded, while `battery_energy_after_kwh`
+  and `grid_kwh` are *derived* from them, and the builder walks a `(6, 9, None)` precision ladder, keeping the first
+  rung that replays clean. A test reproduces the 6 dp failure on purpose so the ladder cannot be quietly removed.
+- Corrupting the solver's `E` or `g` blocks provably changes nothing in the response — proof that the state and grid
+  values really are re-derived rather than copied out of the solution vector.
+- **Fails closed rather than clipping.** Overshoot inside 1e-6 is a rounding artifact and is clipped; anything larger,
+  plus activity in a banned hour or simultaneous charge/discharge, raises `SolverFailure`. Silently zeroing a banned
+  hour would have produced a valid-*looking* plan that hides a solver fault.
+- One real robustness gap surfaced through a bad test of mine: a reconstruction that drives the battery negative threw
+  a raw Pydantic `ValidationError` into the generic 500 handler. Now wrapped as a classified `SolverFailure` with a
+  sanitized message, so the failure is diagnosable rather than anonymous.
+- Added `DirectiveInfeasible` (500) so an impossible *interpretation* stays distinguishable from a solver fault all the
+  way to the HTTP layer. P10 inserts its bounded reparse in front of it. Removed `PipelineNotImplemented`, now dead.
+- The interpreter seam raises `InterpretationUnavailable` rather than falling back to keyword matching — a regex
+  fallback would fail the mandatory-LLM requirement outright, so failing closed is the only honest option.
+- Optimization quality on all known data: `min(1, optimal/team)` = **1.000000** on all 44 cases.
+- **Fixed both open findings from `CODE_REVIEW.md` Review 1** (they landed in the repo during this session):
+  - **R1-1 (High)** was a real bug in my P2/P3 code: `compile_directives()` sorted by `note_index` while
+    `derive_envelope()` trusted list order, so under `SOLAR_OVERLAP_POLICY=last_wins` the same directives in a
+    different order resolved to different effective solar (reproduced: 39.0 vs 104.0). A valid plan could then have
+    been rejected by its own validator. `derive_envelope()` now sorts by `note_index` too, so "last" means "highest
+    `note_index`" on both sides and the result is order-independent. Regression test added to the agreement suite.
+    The default `min_factor` policy is commutative, which is exactly why the existing tests missed it.
+  - **R1-2 (Low)** the unreachable `elif end_hour == HOURS_IN_DAY` branch in `expand_window()` is deleted, with a
+    comment explaining why the forward case already covers it.
+  - Both findings are annotated in `CODE_REVIEW.md` as *fix applied, pending verification*; their status stays
+    `OPEN` because that file's protocol reserves `FIXED` for confirmation in a later review pass.
+- Next session starts at `T-070`: `scripts/run_public_cases.py`, the standalone regression runner that reports
+  interpretation, validity, cost gap, and latency per case.

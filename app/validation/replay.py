@@ -129,7 +129,11 @@ def derive_envelope(
     grid_upper = [math.inf] * HOURS_IN_DAY
     solar_factor: list[float | None] = [None] * HOURS_IN_DAY
 
-    for directive in directives:
+    # Iterate in note_index order, not list order. Under an order-sensitive overlap policy
+    # ("last wins"), "last" has to mean the same thing here as it does in the directive
+    # compiler, or the two would resolve the same directives to different effective solar and
+    # a valid plan could be rejected by its own validator.
+    for directive in sorted(directives, key=lambda item: item.note_index):
         if not directive.applies or directive.structured_adjustment is None:
             continue
         adjustment = directive.structured_adjustment

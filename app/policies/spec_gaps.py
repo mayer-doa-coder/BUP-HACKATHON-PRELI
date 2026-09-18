@@ -85,10 +85,10 @@ def expand_window(
     if inclusive_end:
         end_hour = min(end_hour + 1, HOURS_IN_DAY)
 
+    # "To the end of the day" (end_hour == 24) needs no branch of its own: start_hour is at most
+    # 23, so it is always covered by the ordinary forward case above.
     if end_hour > start_hour:
         return list(range(start_hour, end_hour))
-    if end_hour == HOURS_IN_DAY:
-        return list(range(start_hour, HOURS_IN_DAY))
     if end_hour == start_hour:
         # A degenerate window: no hour lies strictly inside it.
         return []

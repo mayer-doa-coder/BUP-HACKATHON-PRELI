@@ -81,6 +81,16 @@ class InterpretationUnavailable(GridWiseError):
     code = "interpretation_unavailable"
 
 
+class DirectiveInfeasible(GridWiseError):
+    """The scenario is schedulable, but not under this reading of the operator notes.
+
+    Distinct from a solver fault: it points at the interpretation, which is why the bounded
+    semantic reparse is attempted before this ever reaches the caller.
+    """
+
+    code = "directive_infeasible"
+
+
 class DirectiveCompilationFailure(GridWiseError):
     """Validated directives compiled into an impossible constraint set.
 
@@ -101,12 +111,6 @@ class ReplayInvariantFailure(GridWiseError):
     """The serialized response failed independent replay. Never retried, never returned as 200."""
 
     code = "replay_invariant_failure"
-
-
-class PipelineNotImplemented(GridWiseError):
-    """A pipeline stage that has not been built yet. Removed once the pipeline is complete."""
-
-    code = "not_implemented"
 
 
 def correlation_id_of(request: Request) -> str:
@@ -224,9 +228,9 @@ def register_exception_handlers(app: FastAPI) -> None:
 __all__ = [
     "CORRELATION_ID_HEADER",
     "DirectiveCompilationFailure",
+    "DirectiveInfeasible",
     "GridWiseError",
     "InterpretationUnavailable",
-    "PipelineNotImplemented",
     "ReplayInvariantFailure",
     "RequestTooLarge",
     "SemanticallyInvalidRequest",
