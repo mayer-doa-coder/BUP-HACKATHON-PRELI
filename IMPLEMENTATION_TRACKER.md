@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P0-P18 COMPLETE (P19 dropped; P16 deploy + P20 docs/video delegated)`
+**Status:** `P0-P18 COMPLETE, P16 DEPLOYED to Azure App Service (P19 dropped; P20 docs/video delegated)`
 **Last updated:** 2026-09-18
 **Current phase:** P20 — teammates own the README and video; `T-202` release freeze remains
-**Next action:** verify the deployed endpoint, then freeze versions (`T-202`)
+**Next action:** freeze versions (`T-202`) — the deployed URL is `https://gridwise-api.azurewebsites.net` (see §1 and Session 17)
 
 ---
 
@@ -62,8 +62,9 @@ starting the next phase. (User instruction, session 2.)
 | Next task | `T-202` (release freeze) — `T-200`/`T-201` are with teammates |
 | Tests passing | 458 / 458 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
-| Endpoint deployed | no |
-| Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
+| Endpoint deployed | **yes** — `https://gridwise-api.azurewebsites.net` (Azure App Service, Linux B1, Always On, Southeast Asia) |
+| Docker image | built remotely by Azure Container Registry `gridwiseacr50329` (no local daemon needed); running tag `gridwise:1.0.3`, digest `sha256:4a965aed710767a33d183b2a4adc27a921d58fdbd91ebb832f5a3270b2a112b6`, built from commit `7fadf96` |
+| Live verification | 44 / 44 public + extended cases; 65 / 65 real-model paraphrase/injection/provisional cases; 13 / 13 invalid-request cases; `verify_contract.py` 104 / 104 against the deployed URL (details in Session 17) |
 | README | not written |
 
 Local toolchain verified: Python 3.14 (dev) with FastAPI 0.138.1, Pydantic 2.12.5, NumPy 2.4.2, SciPy 1.17.1,
@@ -633,7 +634,7 @@ validator status, versions), and a failure stamps its code.
 > **Latency buckets are chosen around the scored thresholds** — 4.5 s (internal target) and 5 s (full-credit cutoff)
 > are explicit bucket bounds, so p95 reads against the rubric directly instead of being interpolated.
 
-### P16 — Docker & deployment `[ ]`
+### P16 — Docker & deployment `[x]`
 
 - `[x] T-160` **Pulled forward at the user's request (session 11)** — `Dockerfile` (pinned `python:3.12-slim-bookworm`,
   deps installed before source for layer caching, non-root uid 10001, `HEALTHCHECK` → `/health`, `$PORT` honored for
@@ -644,8 +645,9 @@ validator status, versions), and a failure stamps its code.
   image at build time** and fails the build if SciPy cannot actually solve an LP and a MILP;
   `scripts/healthcheck.py` reads `$PORT` so a platform-assigned port cannot look like a dead service.
   **Not yet executed:** no Docker daemon on the authoring machine — see the session log.
-- `[ ] T-162` Deploy to the chosen platform (O-03); verify both endpoints from an external network; push an immutable
-  tag/digest to the registry (O-04).
+- `[x] T-162` Deployed to Azure App Service (Web App for Containers) — see Session 17 for the resource names, the
+  digest-pinned image reference and the verification results. Both endpoints verified from outside Azure.
+  `scripts/verify_docker.py` (T-161) has **still never been executed** — the image was built by ACR, not locally.
 
 ### P17 — Warm canary & latency `[x]`
 
@@ -733,26 +735,26 @@ docker build -t gridwise . && docker run -p 8000:8000 --env-file .env gridwise
 The work is not done until every line here is ticked. Full mechanical list: Guide §44.
 
 ```
-[ ] /health → 200 {"status":"ok"} externally, with no provider call
+[x] /health → 200 {"status":"ok"} externally, with no provider call
 [ ] structural 400 / semantic 422 / internal 500 all verified by test
-[ ] 10/10 public interpretations correct
-[ ] 10/10 public LPs feasible, 10/10 MILPs optimal, cost within 0.01
+[x] 10/10 public interpretations correct (also verified live, real model)
+[x] 10/10 public LPs feasible, 10/10 MILPs optimal, cost within 0.01 (live: max cost gap 0 across all 44)
 [ ] LP <= MILP + tol on every regression case
 [ ] every returned schedule replays PASS after serialization
 [ ] percentage contrast corpus passes (to / by / reduction / operates-at / fractions)
 [ ] time corpus passes (AM/PM / noon / midnight / 24 h / until / between / shared suffix)
 [ ] factor=0 and grid-cap=0 cases pass
 [ ] duplicate-hour and duplicate-note-index model output triggers repair, not silent dedupe
-[ ] prompt-injection notes stay data-only
+[x] prompt-injection notes stay data-only (live model: ADV-01..05 all 5/5)
 [ ] provider refusal / truncation / 429 / 5xx / timeout are all controlled
 [ ] cache keys include battery context + prompt/schema/model/optimizer versions
-[ ] p95 <= 4.5 s measured externally
+[x] p95 <= 4.5 s measured externally (44 cases from a non-Azure client: median 2.8 s, p95 3.2-3.5 s, max 4.1 s; the FIRST call after a restart is slower, see Session 17)
 [ ] warm canary succeeds against the exact production model + prompt + schema
 [ ] Docker: build, run, health, public sample, LP+MILP inside the image
 [ ] no secret in repo, image layers, logs, or responses
 [ ] README clean-environment reproduction succeeds
 [ ] versions recorded and frozen; video accessible
-[ ] scripts/verify_contract.py passes against the DEPLOYED URL (not just localhost)
+[x] scripts/verify_contract.py passes against the DEPLOYED URL (not just localhost) — 104/104 warm, run 2026-09-18
 ```
 
 **The last gate is the submission gate.** `scripts/verify_contract.py --base-url <deployed>` is a
@@ -1213,3 +1215,68 @@ Append one entry per working session, newest last. Keep entries short and factua
   **279/279 checks pass against the local service across all 10 public cases.** Verified it has
   teeth by pointing it at the broken container: it correctly failed with exit code 1 on exactly
   the case the Docker healthcheck cannot see (`/health` fine, `/optimize-energy` 500).
+
+### 2026-09-18 — Session 17 (Azure deployment + live corpus verification)
+
+**Deployed. URL: `https://gridwise-api.azurewebsites.net`** (`GET /health`, `POST /optimize-energy`).
+
+- **Azure layout** (subscription "Azure for Students", resource group `gridwise-rg`, Southeast Asia):
+  ACR `gridwiseacr50329` (Basic, **admin disabled**) → App Service plan `gridwise-plan` (Linux B1) → Web App
+  `gridwise-api` (Web App for Containers, Always On, `WEBSITES_PORT=8000`). The app pulls with its **system-assigned
+  managed identity** (`AcrPull` on the registry, `acrUseManagedIdentityCreds=true`), so no registry password exists.
+  The app runs the image **by digest**, not by tag (O-04): `gridwiseacr50329.azurecr.io/gridwise@sha256:4a965aed…12b6`
+  (tag `1.0.3`, commit `7fadf96`). `APP_COMMIT_SHA` is set to the commit.
+- **Image built by ACR, not locally** (`az acr build`) because this machine has no running Docker daemon.
+  `verify_solver.py` runs in that build, so a SciPy without a working HiGHS would have failed the build.
+  `scripts/verify_docker.py` has still never run.
+- **Why App Service and not Container Apps:** Azure for Students allows **one** Container Apps environment per
+  subscription and another project (`medora-env-us`) already holds it. Not touched. The first Container Apps attempt
+  was deleted (`gridwise-env` and its Log Analytics workspace may remain in `gridwise-rg`; harmless).
+- **Config.** App settings were loaded from the local `.env` (44 keys), **including `LLM_API_KEY` and
+  `BACKUP_LLM_API_KEY`, as plain App Service settings** — encrypted at rest and hidden from the image, but not Key
+  Vault references. Two settings deliberately differ from `.env`: `LLM_ATTEMPT_TIMEOUT_SECONDS=12` (upstream raised the
+  default from 3.2 because a cold model call measures ~8 s; the `.env` copy had pinned the old 3.2 and would have
+  silently overridden the new default) and **no `LLM_TEMPERATURE`** (code default is now `None`).
+- **Root cause of the first live 500s** was the same bug as Session 16 Bug 1: the pinned model rejects
+  `temperature=0.0` with a 400. Diagnosed by replaying the exact `/chat/completions` call with `curl`. Container logs
+  only show `request failed: interpretation_unavailable` — by design no provider detail is logged — so **reproduce the
+  provider call directly rather than hunting in the logs.**
+- **Merge:** local `main` had diverged from `origin/main` (7 upstream commits: cache, observability, demo layer,
+  frontend). One conflict in `app/config.py`, where both sides had written the same blank-temperature validator;
+  upstream's broader version was kept. Merge commit `27ada5d`, pushed. No co-author trailer on any commit (user
+  instruction). `git pull` later brought in `7fadf96` (Session 16 work) and the deployment was rebuilt from it.
+
+**Live verification against the deployed URL (real model, not the offline fakes):**
+
+| Corpus | Result |
+|---|---|
+| `sample_cases.json` + `--extended` (10 public + 34 hidden-like) | **44 / 44** interpretation PASS, validity PASS, max cost gap 0; latency median 2.8 s, p95 3.2–3.5 s, max 4.1 s |
+| `paraphrase_eval.py` — 58 semantic variations (incl. 10 no_op distractors) | **58 / 58** matched, 58 guardrail-clean |
+| adversarial prompt-injection notes ADV-01..05 | **5 / 5** |
+| provisional spec-gap cases (AMB-01/02/04-style) | 2 / 2 (only 2 of the pack's 4 carry a single provisional answer; AMB-03 lists competing readings and is unit-tested instead) |
+| 11 `invalid_request_cases` + 2 `raw_invalid_cases` | **13 / 13** expected HTTP status (400 / 422), no stack trace or key in any body |
+| 14 `guardrail_output_cases` | GR-01..12 asserted by id in `tests/unit/test_guardrails.py`; GR-13/14 (refusal, truncation) covered in `tests/unit/test_llm_interpreter.py`; offline, no LLM needed |
+| `scripts/verify_contract.py --base-url <deployed> --fresh` | **104 / 104** |
+
+- **Cold start is the one real risk.** Right after a restart, `/health` and the first `/optimize-energy` timed out in
+  `verify_contract.py` (first optimize 10.8 s); the same audit passed 104/104 a minute later. Always On is enabled and
+  the warm canary exists, but **after any redeploy or restart, send a warm-up request before a judge can**, and never
+  restart during judging. Not yet measured with `scripts/benchmark_latency.py`.
+- Not covered by any corpus: the 10 `metamorphic_relations` entries are exercised by the property tests, not by id.
+
+**Redeploy recipe (no secrets):**
+```
+az acr build --registry gridwiseacr50329 --image gridwise:<ver> --no-logs .          # --no-logs: az's log streamer crashes on Windows cp1252
+DIGEST=$(az acr repository show --name gridwiseacr50329 --image gridwise:<ver> --query digest -o tsv)
+az webapp config container set -n gridwise-api -g gridwise-rg \
+  --container-image-name gridwiseacr50329.azurecr.io/gridwise@$DIGEST --container-registry-url https://gridwiseacr50329.azurecr.io
+az webapp restart -n gridwise-api -g gridwise-rg      # then warm it: run scripts/run_public_cases.py --endpoint <url>
+```
+**Windows gotchas hit:** in Git Bash, set `MSYS_NO_PATHCONV=1` for any command taking a `/subscriptions/...` id (it
+was rewritten to `C:/Program Files/Git/...`); the `az` process is native Windows, so give it Windows-style paths, not `/tmp`;
+a "Container Apps express environment" cannot use managed-identity registry pull (`ExpressEnvironmentFeatureNotSupported`).
+
+**Open items from this session:** (1) API keys are plain App Service settings — move to Key Vault references if time
+allows; (2) `benchmark_latency.py` p95 against the deployed URL; (3) freeze versions (`T-202`) and record the digest in the README;
+(4) the local `.env` still has `LLM_TEMPERATURE=0.0` (rejected by the pinned model — run local live tools with `LLM_TEMPERATURE=` or blank it) and `LLM_ATTEMPT_TIMEOUT_SECONDS=3.2`, unlike the deployed config; (5) B1 is a
+single instance with no autoscale.
