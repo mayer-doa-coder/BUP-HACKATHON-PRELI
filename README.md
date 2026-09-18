@@ -1,252 +1,395 @@
 # GridWise
 
-LLM-assisted smart-campus energy optimizer built for the BUP CSE Fest 2026 hackathon preliminary. A single HTTP
-service that turns free-text operator notes plus a 24-hour demand/solar/tariff/battery scenario into an optimal
-grid/battery dispatch plan, judged by an automated harness.
+LLM-assisted smart-campus energy optimizer for the **BUP CSE Fest 2026 Hackathon Preliminary**.
 
-> **This README reflects work-in-progress state, not a finished product.** For the authoritative, up-to-date build
-> status, decision log, and task board, see [IMPLEMENTATION_TRACKER.md](IMPLEMENTATION_TRACKER.md). This file is a
-> snapshot of what exists today.
+One HTTP service. It reads 1–3 free-text operator notes plus a 24-hour demand / solar / tariff / battery
+scenario, and returns a cost-optimal 24-hour grid-and-battery dispatch plan.
 
-## Status: P0–P6 complete — the optimizer path is finished and provably optimal; the LLM interpreter is the one thing standing between this and a working endpoint
+The split of responsibility is the whole design:
 
-Seven phases are done: **P0 — Scaffolding**, **P1 — Schemas, endpoints, error mapping**, **P2 — Independent replay
-validator**, **P3 — Directive compiler**, **P4 — Shared LP/MILP model**, **P5 — Solvers**, and **P6 — Canonicalizer,
-response builder, service wiring**.
+> **The language model never produces a kilowatt-hour.** It only translates operator notes into a closed,
+> typed directive schema. Every number in the response comes from a deterministic MILP optimizer.
 
-Everything from a validated request to a replay-cleared response now works. Given directives, the service compiles
-them into per-hour constraints, screens feasibility with an LP, solves the authoritative MILP, builds the seven-field
-response, serializes it, parses it back, and validates it with an independently written replay validator — and on
-all 44 known reference cases it reaches the published optimal cost exactly (`min(1, optimal/team_cost)` = 1.000000).
+---
 
-**The endpoint is nevertheless not usable end to end yet.** A real `POST /optimize-energy` still returns a controlled
-`500 InterpretationUnavailable`, because the one stage that produces directives — the LLM interpreter (P8) and its
-guardrails (P9) — does not exist. The seam deliberately fails closed rather than falling back to keyword matching,
-which would defeat the mandatory-LLM requirement. Inject a stub interpreter and the same endpoint returns a full,
-valid 200.
+## Status
 
-## What is actually done
+Complete and verified end to end.
 
-**P0 — Scaffolding**
+| Check | Result |
+|---|---|
+| Test suite | **458 passed**, `ruff` clean |
+| Public sample cases (live, through the real model) | **10/10**, cost gap **+0.00** on every case |
+| API contract audit | **279/279** checks, exit code 0 |
+| Latency, cold caches, every case a real model call | p50 ~2.5 s, **p95 3.26 s** (rubric: ≤5 s for full credit) |
+| Docker | builds, runs, healthy, passes all of the above inside the container |
 
-- Project tooling (`pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.gitignore`, `.dockerignore`) and
-  the `app/` package tree.
-- **`app/config.py`** — a typed Pydantic `Settings` object (incl. `OVERSIZED_REQUEST_STATUS`,
-  `REJECT_NEGATIVE_ENERGY_INPUTS`). API keys are `SecretStr` and never appear in `repr`/`str`. `.env.example` is
-  committed; `.env` is gitignored.
-- **`public_cases/sample_cases.json`** — the organizer's 10-case sample pack, copied byte-identical from `docs/`
-  (verified by SHA-256) as the regression seed.
+`+0.00` means the exact published optimum, not merely within the 0.01 tolerance.
 
-**P1 — Schemas, endpoints, error mapping**
+Owned elsewhere by teammates: the Azure deployment and the submission video.
 
-- **`app/schemas/request.py`** — strict (`extra="forbid"`) request models: `OptimizeRequest` (1–3 non-empty notes,
-  exactly 24 hours, hour set exactly `{0..23}`), `HourInput`, `BatteryInput`, a `Finite` float type rejecting
-  NaN/Inf, and `canonical_hours()` which orders by the `hour` field so array position is never trusted. Domain-sanity
-  checks (e.g. negative energy) are deliberately kept separate in `validation/request_semantics.py` so they surface
-  as 422, not 400.
-- **`app/schemas/directive.py`** — the closed six-variant directive taxonomy as a discriminated union
-  (`Literal`-tagged), with an `HourSetAdjustment` base enforcing unique/ascending/in-range/non-empty hours.
-- **`app/schemas/response.py`** — `HourPlan` + `OptimizeResponse` with exactly the seven canonical response fields
-  and fail-closed validators (plan covers hours 0–23 in order, `note_index` is 0..N-1 in order, `idle` carries zero
-  magnitude).
-- **`app/api/errors.py`** — the `GridWiseError` taxonomy (`StructurallyInvalidRequest` → 400,
-  `SemanticallyInvalidRequest` → 422, `RequestTooLarge` → configurable status, `InterpretationUnavailable` /
-  `DirectiveInfeasible` / `SolverFailure` / `ReplayInvariantFailure` → 500) with handlers that override FastAPI's
-  default 422-for-everything behavior. 500 responses carry only a correlation ID — no stack traces, prompts, or
-  payloads.
-- **`app/api/middleware.py`** — correlation-ID injection and a request body-size guard.
-- **`app/api/routes.py` + `app/main.py`** — `/health` (no LLM/solver call) and `/optimize-energy` wired through a
-  `get_optimize_service` dependency seam.
+---
 
-Verified: all 11 `invalid_request_cases` and both `raw_invalid_cases` from the adversarial corpus map to their
-expected HTTP status; all 10 public + 34 extended-corpus request/response bodies round-trip through the canonical
-models unchanged; `no_op` directives serialize with an explicit `"structured_adjustment": null`; negative tariff is
-correctly *not* rejected.
+## Quick start
 
-**P2 — Independent replay validator**
+### Docker (recommended — this is what gets deployed)
 
-- **`app/validation/replay.py`** — `replay()`, an independent re-check of a plan's arithmetic and constraints: a
-  `ViolationCode` enum (21 stable codes), `Violation`, `ValidationReport`, and `ConstraintEnvelope`. It **derives
-  its own constraint envelope** from the request rather than calling the optimizer's directive compiler, so it
-  cannot inherit a bug from the code it is meant to catch (deliberate duplication — `IMPLEMENTATION_TRACKER.md`
-  D-09). An AST-level test asserts `replay.py` imports nothing from `app.optimizer`.
-- **`app/validation/totals.py`** — `recalculate_totals()`, recomputing `total_grid_kwh` / `total_cost_bdt` /
-  `peak_grid_kwh` from the plan itself (via `math.fsum`, keyed by hour number, never array position).
+```bash
+cp .env.example .env      # then fill in LLM_MODEL and LLM_API_KEY
+docker compose up -d --build
+```
 
-Verified: all 44 reference plans replay clean at 0.01, at 1e-6, and still at 1e-9 — agreement with organizer ground
-truth at machine precision, not merely inside judge tolerance. 20 mutation fixtures each fail with the expected
-violation code, so the validator is proven to catch bad plans, not just pass good ones.
+The API is on **http://localhost:8000**. See [DOCKER.md](DOCKER.md) for image details and Azure notes.
 
-**P3 — Directive compiler**
+### Local Python
 
-- **`app/optimizer/compile_directives.py`** — `CompiledConstraints` (NumPy arrays: `effective_solar`, `min_energy`,
-  `charge_allowed`, `discharge_allowed`, `grid_upper`), a `ConstraintTrace` recording per-hour provenance, and
-  `_assert_compiled_invariants()` which fails closed rather than silently clipping an out-of-range value.
-- **`app/policies/spec_gaps.py`** — the provisional spec-gap policies as isolated, config-flagged functions:
-  `compose_solar_factors()`, `expand_window()` (the single source of truth for the time-window convention),
-  `through_is_end_exclusive()`, `single_hour_window()`, and `policy_summary()`.
+```bash
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env      # then fill in LLM_MODEL and LLM_API_KEY
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-Verified: the compiler and P2's independently-written `derive_envelope()` agree on all five constraint arrays across
-all 44 reference cases — two separate implementations of the same rules reaching the same answer. That agreement
-check was itself probed to confirm it is sensitive to a flipped boolean, an `inf`→finite cap, and a 0.001 kWh drift.
-`factor=0.0` and `max_grid_kwh=0.0` survive compilation; a reserve above capacity fails closed.
+Python **3.12** in the image; 3.14 also works for local development.
 
-**P4 — Shared LP/MILP model**
+### After deploying — do not skip this
 
-- **`app/optimizer/model.py`** — `OptimizationModel`: one variable layout (`g, s, c, d, E, yc, yd` — 168 variables,
-  49 equality rows, 72 inequality rows) and one constraint builder shared by both stages. Deliberately **has no
-  `stage` parameter** — the LP and MILP cannot be handed different problems, which is what makes the
-  `LP_cost <= MILP_cost` invariant meaningful rather than trivially true. Directives enter purely as variable
-  bounds; the model never inspects a directive.
+```bash
+python scripts/warm_canary.py
+```
 
-Verified: all 44 published reference schedules are feasible points of the model (equality, inequality, and bound
-residuals below 1e-9), and the objective reproduces every published `total_cost_bdt` to 1e-6.
+The first request against a cold model costs roughly **8 seconds** (connection setup plus model/schema
+warm-up); warm requests cost about 2.5 s. The canary pays that cost on your behalf and verifies credentials,
+schema, guardrails and semantics against the real provider. **Run it after deploy and before judging**, or the
+first judged request pays the cold cost.
 
-**P5 — Solvers**
+---
 
-- **`app/optimizer/lp_relaxation.py`** — `solve_lp_relaxation()` via `linprog(method="highs")`, with the mode
-  variables left continuous in `[0,1]`. Used for feasibility screening, as a lower bound, and for diagnostics;
-  never returned as a schedule.
-- **`app/optimizer/milp_solver.py`** — `solve_milp()` via `scipy.optimize.milp` with binary mode variables and a
-  time limit, capturing `mip_gap` and `dual_bound`. A time-limited but feasible incumbent counts as *usable*: a
-  valid, slightly suboptimal plan still earns directive-application and partial optimization credit, whereas a 500
-  earns nothing. Validity is never traded away — the replay validator still has the final say.
-- **`app/optimizer/hybrid_solve.py`** — `screen_baseline_feasibility()` (the pre-LLM screen, so an impossible
-  scenario never spends a paid call) and `hybrid_solve()`. **Solver problems are returned as statuses, never
-  raised**, because the pipeline needs three different responses to failure: `BASELINE_INFEASIBLE` → 422,
-  `DIRECTIVE_INFEASIBLE` → a bounded semantic reparse in P10, `SOLVER_FAILURE` → 500. Three invariants gate every
-  solution: `LP <= MILP + tol`, model residuals within 1e-6, and no hour both charging and discharging.
+## API
 
-Verified: all 44 reference cases reach the published optimum exactly, MILP optimality proven on every one,
-`LP <= MILP` everywhere. Edge cases covered: zero-capacity battery, zero charge rate, a fully rigid battery,
-negative tariff (solves, cost goes negative, stays bounded), `factor=0.0`, both bans on one hour, and a zero grid
-cap (→ `DIRECTIVE_INFEASIBLE`). Failure injection confirms a crashing solver surfaces as `SOLVER_FAILURE` rather
-than a traceback.
+Two endpoints, one service, one origin.
 
-*Latency headroom:* baseline screen p50 3.3 ms, LP 3.0 ms, MILP 15.6 ms; worst observed total **39 ms** against a
-4,500 ms budget. The LLM call will be the only meaningful latency cost in the pipeline.
+### `GET /health`
 
-**P6 — Canonicalizer, response builder, service wiring**
+Readiness only — makes no LLM or solver call.
 
-- **`app/optimizer/result.py`** — `build_hourly_plan()` rounds **only the independent decisions** (charge, discharge,
-  solar used) and then *derives* the rest: `battery_energy_after_kwh` is rebuilt sequentially from the rounded
-  movements and `grid_kwh` is recomputed from the energy balance, so the balance closes by construction. Rounding
-  overshoot within 1e-6 is clipped as an artifact; anything larger fails closed as `SolverFailure`, as does activity
-  in a banned hour or simultaneous charge/discharge.
-- **`app/services/plan_summary.py`** — `build_plan_summary()`, deterministic and adaptive: it does not claim the
-  battery shifted energy on a day when the battery never moved.
-- **`app/services/optimize_service.py`** — the real pipeline: `validate` → `screen_feasibility` → `interpret`
-  (the P8 seam) → `solve_and_build`. `SolveStatus` becomes an HTTP outcome here and nowhere else. The response is
-  serialized, **parsed back**, and replayed before it is returned; a replay failure is a controlled 500, never a
-  retry and never a 200.
+```json
+{ "status": "ok" }
+```
 
-Verified: all 44 reference cases build a replay-clean response at the published optimal cost — quality ratio
-`min(1, optimal/team_cost)` is **exactly 1.000000 on every case**. Corrupting the solver's own `E` or `g` blocks
-changes nothing in the response, proving both really are re-derived rather than copied out of the solution vector.
-Deterministic across repeated solves.
+### `POST /optimize-energy`
 
-> **The precision ladder is load-bearing, not decoration.** Rounding to 6 dp is enough to break a valid plan when
-> inputs carry long decimals: the rounded battery movements stop cancelling over the day and the end-of-day balance
-> drifts past the 1e-7 internal tolerance. The builder therefore tries `(6, 9, None)` decimal places and keeps the
-> first rung that replays clean. A regression test reproduces the 6 dp failure deliberately. Do not collapse it.
+Request (abbreviated — 24 hour entries required):
 
-## What is not done yet
+```json
+{
+  "scenario_id": "SAMPLE-02",
+  "operator_notes": ["The battery charger will be isolated from 2 AM until 5 AM for electrical maintenance."],
+  "hours": [{ "hour": 0, "demand_kwh": 100, "solar_kwh": 0, "tariff_bdt_per_kwh": 6 }],
+  "battery": {
+    "capacity_kwh": 200, "initial_energy_kwh": 70, "minimum_energy_kwh": 30,
+    "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55
+  }
+}
+```
 
-The LLM directive interpreter and prompts (P8), deterministic guardrails on LLM output (P9), repair/retry and
-feasibility-aware reinterpretation (P10), the public-case regression runner `scripts/run_public_cases.py` (P7), the
-semantic/adversarial corpus (P12), property and metamorphic tests (P13), caching (P14), observability (P15), Docker
-packaging and deployment (P16), the warm canary and latency benchmark (P17), the demo layer (P18), CI (P19), and the
-submission README/video/release freeze (P20). There is no `scripts/` directory and no `Dockerfile` yet.
+Response — exactly seven top-level fields, no more:
 
-See the phase board in `IMPLEMENTATION_TRACKER.md` §6 for the full remaining scope, and §1 for the live status
-snapshot.
+```json
+{
+  "scenario_id": "SAMPLE-02",
+  "directive_interpretation": [{
+    "note_index": 0, "applies": true, "directive_type": "no_charge_window",
+    "structured_adjustment": { "hours": [2, 3, 4] },
+    "explanation": "Battery charging is unavailable during maintenance."
+  }],
+  "hourly_plan": [{
+    "hour": 0, "grid_kwh": 120.0, "solar_used_kwh": 0.0,
+    "battery_action": "charge", "battery_kwh": 20.0, "battery_energy_after_kwh": 90.0
+  }],
+  "total_grid_kwh": 2915.0,
+  "total_cost_bdt": 42885.0,
+  "peak_grid_kwh": 180.0,
+  "plan_summary": "Avoids charging during the maintenance window, …"
+}
+```
 
-Both findings from the first `/code-review` pass (an ordering disagreement between `compile_directives()` and
-`derive_envelope()` under a non-default overlap policy, and a dead branch in `expand_window()`) are **fixed and
-verified in the code**. Note that the P4–P6 code above has never been through a review pass — see
-[CODE_REVIEW.md](CODE_REVIEW.md).
+### Error mapping
+
+FastAPI answers 422 for body-validation errors by default, which is wrong here, so it is overridden explicitly.
+
+| Condition | Status |
+|---|---|
+| Malformed JSON, missing field, wrong type, bad hour set, 0 or >3 notes | **400** |
+| Well-formed but semantically invalid; baseline-infeasible scenario | **422** |
+| LLM unusable after budget, solver failure, replay failure | **500** |
+
+A 500 body carries a correlation ID and nothing else — never a stack trace, prompt, provider payload or secret.
+
+---
+
+## How it works
+
+```
+HTTP request
+  → Pydantic validation + hour canonicalization (sorted by `hour`; array order is never trusted)
+  → Baseline feasibility LP, no directives          → infeasible ⇒ controlled 422
+  → LLM directive interpreter (ONE structured call for all notes)
+  → Deterministic guardrails                        → reject, or one bounded repair
+  → Directive compiler (per-hour parameters)
+  → LP relaxation of the constrained model          → infeasible ⇒ one focused reinterpretation
+  → Final MILP (authoritative)                      → assert LP_cost ≤ MILP_cost + tol
+  → Canonicalize → serialize → parse back
+  → Independent replay of the exact response values → fail ⇒ controlled 500
+  → Response
+```
+
+Replay failure is treated as an invariant failure: never retried blindly, never returned as a 200.
+
+### Directive taxonomy (closed set)
+
+| `directive_type` | `structured_adjustment` | Optimizer effect |
+|---|---|---|
+| `solar_reduction` | `{"hours":[…], "factor": n}` | `effective_solar[h] = solar[h] * factor` |
+| `minimum_battery_reserve` | `{"hours":[…], "minimum_energy_kwh": n}` | `E[h] ≥ max(base_min, directive_min)` |
+| `no_charge_window` | `{"hours":[…]}` | `c[h] = 0` |
+| `no_discharge_window` | `{"hours":[…]}` | `d[h] = 0` |
+| `max_grid_window` | `{"hours":[…], "max_grid_kwh": n}` | `g[h] ≤ max_grid_kwh` |
+| `no_op` | `null` | none |
+
+An unrecognized type from the model is a guardrail rejection, never a silent coercion.
+
+Two semantic rules cost points when wrong, so they are worth stating plainly:
+
+- **`factor` is the fraction that remains.** "reduced to 20%" and "an 80% reduction" both give `0.2`;
+  "reduced by 20%" and "operating at 80%" both give `0.8`.
+- **Windows are start-inclusive, end-exclusive.** 1 PM–3 PM → `[13, 14]`; "6 until 9 PM" → `[18, 19, 20]`.
+
+### Energy model
+
+```
+g[h] + s[h] + d[h] = demand[h] + c[h]            # balance, every hour
+E[0] = initial + c[0] − d[0];  E[h] = E[h−1] + c[h] − d[h]
+E[23] = initial_energy_kwh                       # end-of-day neutrality
+active_min[h] ≤ E[h] ≤ capacity
+0 ≤ s[h] ≤ effective_solar[h]                    # curtailment allowed, no export
+0 ≤ c[h] ≤ max_charge · yc[h];  0 ≤ d[h] ≤ max_discharge · yd[h];  yc[h] + yd[h] ≤ 1
+minimize  Σ g[h] · tariff[h]
+```
+
+168 variables. LP via `scipy.optimize.linprog(method="highs")`, MILP via `scipy.optimize.milp`.
+`idle` is derived when both magnitudes are zero. Totals are always recomputed from the returned plan.
+
+---
+
+## Verifying it
+
+Four independent levels of checking, all runnable against a deployed URL.
+
+```bash
+# 1. The full test suite (no network, no credentials needed)
+pytest
+
+# 2. Correctness: interpretation semantics, validity, and cost vs. the published optimum
+python scripts/run_public_cases.py public_cases/sample_cases.json --endpoint http://localhost:8000
+
+# 3. API contract: exactly what the judge sees, as a black box
+python scripts/verify_contract.py --base-url http://localhost:8000 --cases 0 --fresh
+
+# 4. Latency
+python scripts/benchmark_latency.py
+```
+
+All of these also run inside the container:
+
+```bash
+docker exec gridwise python scripts/verify_contract.py --base-url http://127.0.0.1:8000 --cases 0 --fresh
+docker exec gridwise python scripts/run_public_cases.py public_cases/sample_cases.json --endpoint http://127.0.0.1:8000
+docker exec gridwise python scripts/warm_canary.py
+```
+
+**`scripts/verify_contract.py` is the submission gate.** It imports nothing from `app`, so a bug shared with the
+implementation cannot hide from it. It checks that both endpoints answer on one origin, that `/health` returns
+exactly `{"status":"ok"}` fast enough to serve as a readiness probe, that the response carries exactly the
+documented fields and **no undocumented extras**, that directive types stay inside the closed taxonomy, that
+every number re-derives from the returned plan (hourly balance, battery continuity, end-of-day neutrality,
+bounds, rate limits, all three totals), that the 400/422 error mapping holds, and that no error body leaks a
+secret or a stack trace. Exit code 0 means conformant.
+
+> A container reporting `healthy` proves very little: the Docker healthcheck only probes `/health`, which by
+> design makes no LLM call. A service that fails 100% of real requests still reports healthy. Run the contract
+> audit against the deployed URL before judging.
+
+### Other scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/warm_canary.py` | Post-deploy warm-up + credential/schema/semantic smoke test; prints the version record |
+| `scripts/verify_docker.py` | Builds the image and proves it serves the contract, runs non-root, bakes no secrets |
+| `scripts/verify_solver.py` | Checks the LP/MILP stack inside the runtime environment |
+| `scripts/semantic_corpus.py` | The paraphrase/adversarial corpus used by the interpreter tests |
+| `scripts/paraphrase_eval.py` | Scores interpretation accuracy across paraphrases |
+| `scripts/healthcheck.py` | Container `HEALTHCHECK` entry point |
+
+---
+
+## Configuration
+
+Everything is environment-driven. `.env.example` is committed and holds **no values**; the real `.env` is
+gitignored *and* excluded from the Docker build context.
+
+Minimum to run:
+
+```bash
+LLM_PROVIDER=openai          # openai | openai_compatible | azure_openai | gateway | anthropic
+LLM_MODEL=<pinned model id>
+LLM_API_KEY=<key>
+```
+
+Settings worth knowing about:
+
+| Variable | Default | Why it matters |
+|---|---|---|
+| `LLM_TEMPERATURE` | *(unset — omitted)* | **Leave blank.** Some models reject an explicit temperature with `400 unsupported_value` instead of ignoring it, which fails *every* request. Omitting the parameter works everywhere. |
+| `LLM_ATTEMPT_TIMEOUT_SECONDS` | `12.0` | Must exceed a **cold** call (~8 s), not just a warm one (~2.5 s), or the first request after startup times out and retries. |
+| `LLM_MAX_ATTEMPTS` | `2` | Bounded repair budget. |
+| `MILP_RELATIVE_GAP` | `0.0` | HiGHS defaults to a 1e-4 MIP gap and returns near-optimal solutions with a success status. Must be 0 to claim proven optimality. |
+| `HARD_REQUEST_DEADLINE_SECONDS` | `28.0` | Sits below the organizer's 30 s limit so fallbacks terminate in time. |
+| `JUDGE_MODE` | `true` | Keeps the judged surface to exactly the two endpoints. |
+| `DEMO_MODE` | `false` | Mounts an optional `/demo` router. Requires `JUDGE_MODE=false`. |
+| `METRICS_ENABLED` | `true` | Prometheus-compatible `/metrics`, on its own router, outside the judged surface. |
+| `APP_COMMIT_SHA` | *(unset)* | Set it at release; it appears in the version record and in cache keys. |
+
+Cache keys include the prompt version, schema version, pinned model id, optimizer version and battery context —
+a parser cache keyed only on note text would be a correctness bug.
+
+The full list is in [.env.example](.env.example).
+
+---
 
 ## Repository layout
 
 ```
 app/
-  api/            HTTP routes, error mapping, middleware        — implemented (P1)
-  schemas/        Pydantic request/response/directive models    — implemented (P1)
-  optimizer/      Directive compiler, shared model, LP, MILP,
-                  hybrid orchestration, response builder        — implemented (P3–P6)
-  validation/     Request semantics, replay validator, totals   — implemented (P1–P2)
-  services/       Pipeline orchestration + plan summary         — implemented (P6); interpret() seam fails closed
-  policies/       Config-flagged spec-gap policies              — implemented (P3)
-  llm/            LLM interpreter, prompts, provider adapters    (not yet implemented — P8)
-  guardrails/     Deterministic validation of LLM output         (not yet implemented — P9)
-  observability/  Structured logging, metrics                    (not yet implemented — P15)
-  cache/          Request/response caching                       (not yet implemented — P14)
-  demo/           Optional demo routes behind DEMO_MODE          (not yet implemented — P18)
-  config.py       Typed Settings — implemented (P0)
-  main.py         FastAPI app entrypoint — implemented (P1)
+  main.py                    FastAPI app factory, lifespan, middleware order
+  config.py                  typed Settings; API keys are SecretStr
+  api/                       routes, error taxonomy → HTTP mapping, middleware
+  schemas/                   request / directive (discriminated union) / response models
+  llm/                       prompts, JSON schema, interpreter, bounded repair
+    providers/               OpenAI-compatible and Anthropic adapters
+  guardrails/                deterministic validation + normalization of model output
+  optimizer/                 directive compiler, shared model, LP, MILP, hybrid solve
+  validation/                independent replay, totals, request semantics
+  services/                  orchestration, plan summary, per-request deadline
+  observability/             structured logging, metrics, context-local tracing
+  cache/                     request + parser caches
+  policies/                  spec-gap policies, isolated and config-flagged
+  demo/                      optional reviewer-facing layer, off by default
 
-docs/              Organizer documents and team specs — read-only, never edited
-public_cases/      Copy of the organizer's 10-case sample pack (regression seed)
-tests/unit/        Config, schema, replay, compiler, spec-gap, model, solver, result-builder tests
-tests/integration/ API contract / error mapping, and full-pipeline tests
-IMPLEMENTATION_TRACKER.md   Live status, locked/open decisions, phase board, session log
-CODE_REVIEW.md     Running /code-review findings log — status tracked across passes
-CLAUDE.md          Repository instructions and non-negotiable rules for AI-assisted work
+tests/                       unit · integration · property · regression · security
+scripts/                     verification, benchmarking, operational tooling
+public_cases/                the organizer's 10-case pack (byte-identical to docs/)
+frontend/                    optional React + Vite demo UI (not part of the judged service)
+docs/                        organizer documents — read-only
 ```
 
-## Running what exists today
+---
+
+## Design decisions worth defending
+
+**The LLM is a translator, not a planner.** It emits typed directives and nothing else. Every kWh is computed by
+the optimizer from those directives. This is a hard requirement of the problem, and it is enforced structurally.
+
+**No keyword fallback, ever.** When the model is unusable after the retry budget, the request fails closed with a
+controlled 500. A regex matcher standing in for the model would defeat the mandatory-LLM requirement outright, so
+that path does not exist.
+
+**MILP is authoritative; LP is a screen.** The LP provides feasibility screening and a lower bound, and
+`LP_cost ≤ MILP_cost + tol` is asserted on every solve. The LP plan is never returned.
+
+**The replay validator shares no code with the optimizer.** It was written independently and reconstructs the
+schedule from the serialized response alone. An AST-level import test enforces the separation, so a bug in the
+optimizer cannot be mirrored by the thing meant to catch it.
+
+**Model output is untrusted data.** Guardrails may only sort by `note_index`, sort an already-unique hour set,
+normalize `-0.0` and trim whitespace. They must never deduplicate hours, clip out-of-range numbers or repair
+semantics — silently "fixing" a wrong interpretation produces a confidently wrong plan.
+
+**Rounding is not applied field by field.** Only independent decisions are rounded; battery level and grid draw
+are derived from them, through a `(6, 9, None)` decimal precision ladder. Rounding every field independently
+breaks end-of-day battery neutrality on long-decimal inputs.
+
+**Nothing from the public samples is hard-coded.** No sample wording, IDs, values or schedules appear in the
+decision path. Hidden notes paraphrase, and a matcher tuned to the public pack would score zero on them.
+
+---
+
+## Testing
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
-
-pytest                                              # 174 passing
-ruff check .                                        # lint gate
-uvicorn app.main:app --host 0.0.0.0 --port 8000     # run the service
-curl http://localhost:8000/health                   # -> {"status":"ok"}
+pytest                                  # everything
+pytest tests/unit/test_replay.py        # one file
+pytest -k "guardrail"                   # by keyword
+ruff check .
 ```
 
-`/health` works. `POST /optimize-energy` validates the request, screens feasibility, and then returns a controlled
-`500 InterpretationUnavailable`, since directives can only come from the LLM interpreter that P8 will add. The
-optimizer path behind that seam is fully exercised by `tests/integration/test_optimize_pipeline.py`, which feeds
-ground-truth directives straight into `OptimizeService.solve_and_build`.
+458 tests across five layers:
 
-> Verified in this environment on 2026-09-18: **174 tests pass in 9.35 s**. `ruff` was *not* verified — it is not
-> installed on either available interpreter despite `IMPLEMENTATION_TRACKER.md` listing it as present. Run
-> `pip install -r requirements-dev.txt` first.
+- **unit** — schemas, compiler, solvers, guardrails, replay, config, policies
+- **integration** — the endpoint end to end with a stubbed provider; error mapping; live-provider tests (opt-in)
+- **property / metamorphic** — more available solar cannot raise optimal cost; tightening a feasible reserve or
+  grid cap cannot lower it; removing a hard constraint cannot worsen the objective
+- **regression** — all 10 public cases, plus every bug ever found, pinned
+- **security** — secret-leak checks, prompt-injection notes staying data-only, oversized bodies
 
-The commands below are the **intended** interface once later phases land — they do not work yet:
+Tests never make billable API calls: `tests/conftest.py` clears provider credentials at import unless
+`GRIDWISE_TEST_ALLOW_LIVE=1` is set explicitly.
+
+---
+
+## Frontend (optional)
+
+A small React + TypeScript + Vite demo UI lives in `frontend/`. It is **not** part of the judged service and is
+not containerized — it exists to exercise the API by hand.
 
 ```bash
-python scripts/run_public_cases.py public_cases/sample_cases.json   # 10-case regression (P7)
-python scripts/benchmark_latency.py                                 # p95 check (P17)
-docker build -t gridwise . && docker run -p 8000:8000 --env-file .env gridwise   # (P16)
+cd frontend
+npm install
+npm run dev     # http://localhost:5173
 ```
 
-## Key design decisions already locked
+It shows only the documented response fields, builds a request from the public samples or by hand, and proxies
+`/api/*` to the backend server-side to avoid CORS. The proxy targets `127.0.0.1:8000` deliberately: Node resolves
+`localhost` to IPv6 first, and if anything else holds the IPv6 side of port 8000 — a published Docker container
+is the usual culprit — requests silently go to that instead. Override with `VITE_BACKEND_URL`.
 
-These govern everything built from here on (full list with rationale in `IMPLEMENTATION_TRACKER.md` §2):
+---
 
-- The LLM only translates operator notes into a fixed, closed set of 6 directive types — it never computes kWh
-  values, costs, or schedules. The optimizer produces every number.
-- LP is relaxation/feasibility screening only; **MILP is the authoritative final optimizer**.
-- LLM output is untrusted until it passes deterministic guardrails; guardrails may only sort/normalize, never
-  repair or coerce semantics.
-- Build order is optimizer-first, LLM second.
-- The independent replay validator shares no code with the model builder or canonicalizer.
-- Nothing is returned that has not been serialized, parsed back, and replayed.
-- Testing is targeted at correctness-critical surfaces rather than blanket coverage.
+## Provisional policies (spec gaps, not organizer rules)
 
-## Where to look for more detail
+The Problem Statement does not define these cases. Each is isolated and config-flagged so a clarification is a
+one-line change. They are **not** presented as canonical.
 
-| Question | Where |
+| Case | Policy | Flag |
+|---|---|---|
+| Cross-midnight window (11 PM–2 AM) | modulo-24 expansion → `[0, 1, 23]` | `CROSS_MIDNIGHT_POLICY` |
+| "through" wording | end-exclusive | `THROUGH_RANGE_POLICY` |
+| Overlapping different solar factors | most restrictive `min(factor)` + internal ambiguity flag | `SOLAR_OVERLAP_POLICY` |
+| Single-hour phrasing ("the 4 PM hour") | `[16]` | — |
+| Negative tariff | accepted; the request schema never forbids it | — |
+
+---
+
+## Further reading
+
+| Document | Contents |
 |---|---|
-| Live build status, task board, session history | [IMPLEMENTATION_TRACKER.md](IMPLEMENTATION_TRACKER.md) |
-| Open/fixed `/code-review` findings, tracked across passes | [CODE_REVIEW.md](CODE_REVIEW.md) |
-| Repository rules for AI-assisted development | [CLAUDE.md](CLAUDE.md) |
-| Canonical API schema, directives, guardrails, energy rules | [docs/BUP_CSE_FEST_2026_Preliminary_Problem_Statement_GridWise_LLM.md](docs/BUP_CSE_FEST_2026_Preliminary_Problem_Statement_GridWise_LLM.md) |
-| Deployment, scoring, penalties, latency, submission | [docs/BUP_CSE_FEST_2026_Participant_Guide_%26_Evaluation_Rubric_GridWise_LLM.md](docs/BUP_CSE_FEST_2026_Participant_Guide_%26_Evaluation_Rubric_GridWise_LLM.md) |
-| Product requirements | [docs/PRD.md](docs/PRD.md) |
-| Build guide, module layout, code skeletons | [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) |
+| [IMPLEMENTATION_TRACKER.md](IMPLEMENTATION_TRACKER.md) | Live status, locked decisions, task board, release gates, session log |
+| [DOCKER.md](DOCKER.md) | Image internals, deployment notes |
+| [CODE_REVIEW.md](CODE_REVIEW.md) | Review findings and their resolutions |
+| [CLAUDE.md](CLAUDE.md) | Working rules for AI-assisted contributions |
+| `docs/` | Organizer documents — **read-only**; the Problem Statement wins any disagreement |
 
-A complete, submission-ready README (env var reference, curl examples, Docker instructions, known limitations,
-secret handling) is planned as task `T-200` in the final documentation phase, once the service is functional.
+## License
+
+MIT — see [LICENSE](LICENSE).
