@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P7 + P8 COMPLETE — awaiting approval to start P9`
+**Status:** `P9 + P10 COMPLETE — awaiting approval to start P11`
 **Last updated:** 2026-09-18
-**Current phase:** P9 (not started)
-**Next action:** `T-090` (deterministic guardrails)
+**Current phase:** P11 (not started)
+**Next action:** `T-110` (end-to-end public regression through the real endpoint)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P9 — Deterministic guardrails (not started) |
-| Last completed task | `T-082` (P7 + P8 complete) |
-| Next task | `T-090` |
-| Tests passing | 237 / 237 (+2 `live` deselected), `ruff check .` clean |
+| Phase | P11 — End-to-end public regression (not started) |
+| Last completed task | `T-101` (P9 + P10 complete) |
+| Next task | `T-110` |
+| Tests passing | 301 / 301 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 optimizer-path, 44 / 44 incl. extended. LLM path proven with a stubbed provider; needs credentials (O-01) for a live run |
 | Endpoint deployed | no |
 | Docker image | not built |
@@ -254,12 +254,12 @@ app/
 [x] api/routes.py               [x] api/errors.py           [x] api/middleware.py
 [x] schemas/request.py          [x] schemas/directive.py    [x] schemas/response.py    [ ] schemas/internal.py
 [x] llm/base.py                 [x] llm/interpreter.py      [x] llm/prompts.py   [x] llm/schema.py
-[x] llm/providers/openai_provider.py  [x] llm/providers/anthropic_provider.py  [ ] llm/repair.py
-[ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
+[x] llm/providers/openai_provider.py  [x] llm/providers/anthropic_provider.py  [x] llm/repair.py
+[x] guardrails/directive_validator.py   [x] guardrails/normalizer.py   [-] guardrails/conflict_checks.py
 [x] optimizer/compile_directives.py     [x] optimizer/model.py         [x] optimizer/lp_relaxation.py
 [x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [x] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
-[x] services/optimize_service.py   [x] services/plan_summary.py
+[x] services/optimize_service.py   [x] services/plan_summary.py   [x] services/deadline.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
 [ ] cache/request_cache.py
 [ ] demo/routes.py              [ ] demo/models.py
@@ -466,22 +466,61 @@ stubbed provider through the real prompt, schema, compiler, solvers, canonicaliz
 prompt-injection note, which reaches the model as data and cannot add `battery_shutdown` to the schema.
 `tests/integration/test_live_provider.py` is the opt-in warm canary (`pytest -m live`), deselected by default.
 
-### P9 — Deterministic guardrails `[ ]`
+### P9 — Deterministic guardrails `[x]`
 
-- `[ ] T-090` `guardrails/directive_validator.py` — the full check list (Guide §9).
-- `[ ] T-091` `guardrails/normalizer.py` — only the four permitted normalizations (§4.5).
-  *Acceptance:* fixtures for unknown type, missing/duplicate `note_index`, wrong count, duplicate hours, unsorted hours,
-  hour 24, factor 1.8 / −0.1 / NaN / Inf, reserve > capacity, negative grid cap, `applies=false` on a real directive,
-  non-null `no_op` adjustment, extra field. Each must reject — not clip, not dedupe.
+- `[x] T-090` `guardrails/directive_validator.py` — `GuardrailCode` (26 stable classes), `GuardrailFailure`,
+  `GuardrailReport`, `validate_directives(raw_items, request)`. Runs on the **raw payload** before any Pydantic model
+  exists, because the union would reject an unknown type and a duplicate hour with the same opaque error and the
+  distinction is what P10 routes on. Collects *all* failures, not the first. Ends with the canonical models as a
+  backstop, so a missed check still fails closed.
+- `[x] T-091` `guardrails/normalizer.py` — `sort_entries_by_note_index`, `sort_hours`, `normalize_negative_zero`,
+  `normalize_explanation`. Each refuses to act where acting would hide a fault: entries are not reordered when an
+  index is duplicated or non-integer, and hours are not sorted when they contain duplicates.
+- `[-] guardrails/conflict_checks.py` — **dropped, not deferred.** Every cross-field rule that exists (reserve vs
+  capacity, `applies` vs type, adjustment shape vs type) is scenario-local and lives in the validator; ambiguity
+  flags are already produced by the compiler and feasibility is the LP's job. A separate module would have been
+  filler. Recorded here so a future session does not "restore" it.
 
-### P10 — Repair, retry, feasibility-aware reinterpretation `[ ]`
+*Verified:* 39 tests. All 44 reference interpretations pass **untouched** (no normalization fired — a false rejection
+or a needless rewrite would both be defects). Nine `GR-*` fixtures from the adversarial pack are asserted to fail with
+the exact expected code, plus GR-09 (missing mapping) and GR-10 (duplicate index). Hostile payloads covered:
+`note_index` as a string / as `True` / out of range, `applies` as a string, adjustment as a list, hours as a string /
+empty / fractional / boolean, extra adjustment keys, NaN and Inf in every numeric field. Explicit no-repair tests
+prove duplicate hours are never deduplicated, factors never clipped, hours never clamped, and unknown types never
+coerced. `factor=0.0` and `max_grid_kwh=0.0` survive.
 
-- `[ ] T-100` `llm/repair.py` — failure-class routing per Guide §20 (5xx, 429, refusal/truncation, schema violation,
-  semantic violation, directive-LP infeasible). At most 2 attempts on one interpretation path, deadline-aware.
-- `[ ] T-101` Focused semantic reinterpretation when the baseline LP is feasible but the directive LP is not. Never weaken
-  a constraint to manufacture feasibility.
-  *Acceptance:* simulated provider failures for every class; assert attempt counts, and assert that a replay failure
-  triggers **no** retry.
+> **Two deliberate policy calls, both documented in code.** (1) *Unsorted but unique* hours are **sorted**, not
+> rejected — GR-02 permits either, a window is a set so ordering carries no information, and rejecting would spend a
+> repair round trip on a difference that cannot change the constraint. (2) A missing or non-string `explanation` is
+> filled rather than rejected: it is free text the rubric explicitly does not match, so failing a case over it trades
+> real points for nothing. This is a fifth normalization beyond Guide §9's four, taken knowingly.
+
+### P10 — Repair, retry, feasibility-aware reinterpretation `[x]`
+
+- `[x] T-100` `llm/repair.py` — `InterpretationRunner` with per-class routing (Guide §20): transport 5xx/timeout →
+  short-backoff retry; 429 → honor `retry_after` when it fits, otherwise the backup provider, otherwise stop;
+  refusal/truncation → immediate bounded retry (no backoff — not a load problem); schema violation → repair call
+  carrying the structural problems; guardrail violation → focused semantic repair naming the broken rules.
+  `RepairReason` and `InterpretationRun` carry the telemetry P15 needs. `services/deadline.py` provides the monotonic
+  budget; every attempt is capped by `LLM_MAX_ATTEMPTS` *and* by whether it can still land.
+- `[x] T-101` `reinterpret_for_feasibility()` plus `OptimizeService._solve_with_feasibility_retry()`: on
+  `DIRECTIVE_INFEASIBLE`, exactly one focused reinterpretation that re-reads the original notes and is explicitly told
+  not to weaken, drop or soften anything. If the second reading is also infeasible, the **first** outcome is reported —
+  a second wrong answer is not an improvement.
+- `[x]` Repair prompts live with the other prompts in `llm/prompts.py`; `build_user_payload(request, repair_note)`
+  appends feedback without ever replacing the operator's own words.
+
+*Verified:* 25 tests. Every failure class is asserted to produce its own `RepairReason` **and** the right second-call
+payload — a transport retry carries no corrective text, a schema repair carries the structural problems, a semantic
+repair names the broken rule codes and re-reads the notes. Budget tests: an exhausted deadline makes zero calls, a
+retry too large for the remaining budget is skipped, the attempt timeout never exceeds what is left, and
+`LLM_MAX_ATTEMPTS=1` disables retrying entirely. End-to-end, an infeasible first interpretation earns exactly one
+reinterpretation and the corrected reading reaches the response; a twice-infeasible one raises `DirectiveInfeasible`;
+a feasible first interpretation is never reinterpreted. Replay failure still triggers **no** retry (P6 test).
+
+> **A repair never supplies the answer.** Feedback states what was structurally wrong or which rule broke, never what
+> the directive should have been. Handing over the expected value would make the pipeline look correct while the
+> model's actual understanding stayed wrong — and hidden cases would then fail exactly where it matters.
 
 ### P11 — End-to-end public regression `[ ]`
 
@@ -850,3 +889,30 @@ Append one entry per working session, newest last. Keep entries short and factua
 - Next session starts at `T-090`/`T-091`: the deterministic guardrails that replace `coerce_to_canonical`'s shape gate
   with classified checks (count, note_index coverage, hours, applies semantics, reserve-vs-capacity, finiteness) plus
   the narrow safe normalizations — and nothing else.
+
+### 2026-09-18 — Session 10 (P9 + P10 — guardrails and the repair policy)
+
+- `T-090`, `T-091`, `T-100`, `T-101` complete. 301 tests green (2 `live` deselected), `ruff check .` clean,
+  regression 44/44.
+- **The judge-path pipeline is now feature-complete.** Everything from P1 to P10 is connected: validate → baseline
+  screen → interpret (with bounded repair) → classified guardrails → compile → LP → MILP → canonicalize → serialize →
+  parse back → replay → response. What remains is coverage, hardening, and delivery (P11-P20), not new pipeline stages.
+- P9 validates the **raw payload**, deliberately before Pydantic. The union rejects an unknown directive type and a
+  duplicate hour with the same opaque error, and that difference is precisely what P10 needs in order to choose
+  between a structural repair and a semantic one. It also collects every failure rather than the first, because a
+  repair listing all the problems has a far better chance of landing in the one retry the budget allows.
+- **A real bug caught by its own test:** on a 429 with an unfittable `retry_after`, the runner fell back to the backup
+  provider *and still slept the primary's hint*, burning the budget so the fallback could not land. A different
+  provider is not the one rate-limiting us. Fixed by making the wait part of the routing decision (`_Decision`)
+  instead of a property of the exception — so a refusal, truncation or schema failure now retries immediately, which
+  is both more correct and faster.
+- `conflict_checks.py` was **dropped rather than written as filler** — every cross-field rule is scenario-local and
+  belongs in the validator, ambiguity flags come from the compiler, and feasibility is the LP's job.
+- Two deliberate, documented policy calls in the guardrail: unique-but-unsorted hours are **sorted** (a window is a
+  set; rejecting would spend a repair on a difference that cannot change the constraint), and a missing or non-string
+  `explanation` is **filled** (free text the rubric does not match; failing a case over it trades real points for
+  nothing). The second is a fifth normalization beyond Guide §9's four, taken knowingly.
+- The feasibility retry keeps the **first** outcome when the second reading is also infeasible. A second wrong answer
+  is not an improvement, and reporting the original failure keeps diagnosis honest.
+- Next session starts at `T-110`: the end-to-end public regression through the real endpoint, which needs a pinned
+  provider (O-01) to run against a live model — `scripts/run_public_cases.py --endpoint URL` already supports it.

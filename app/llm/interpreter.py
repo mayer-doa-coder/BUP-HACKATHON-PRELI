@@ -71,14 +71,20 @@ class LlmDirectiveInterpreter:
         request: OptimizeRequest,
         *,
         timeout_s: float | None = None,
+        repair_note: str | None = None,
     ) -> InterpretationOutcome:
-        """Issue one structured-output call and parse the envelope. No semantic checks here."""
+        """Issue one structured-output call and parse the envelope. No semantic checks here.
+
+        ``repair_note`` appends a correction instruction for a bounded second attempt. The
+        system prompt, schema, and original notes are identical either way, so a repair is the
+        same task with extra feedback rather than a different, looser task.
+        """
         note_count = len(request.operator_notes)
         started = time.perf_counter()
 
         response = await self._provider.complete(
             system_prompt=build_system_prompt(self._settings),
-            user_payload=build_user_payload(request),
+            user_payload=build_user_payload(request, repair_note),
             json_schema=build_interpretation_schema(note_count),
             timeout_s=timeout_s if timeout_s is not None else self._settings.llm_attempt_timeout_seconds,
         )

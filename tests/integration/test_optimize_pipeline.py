@@ -192,7 +192,7 @@ def test_http_endpoint_returns_a_valid_body_once_interpretation_is_supplied(publ
     _, directives = _case_inputs(case)
 
     class _StubInterpreterService(OptimizeService):
-        async def interpret(self, request):
+        async def interpret(self, request, deadline=None):
             return directives
 
     app = create_app()
@@ -233,7 +233,7 @@ def test_http_baseline_infeasible_scenario_is_422(public_cases):
     body["battery"]["minimum_energy_kwh"] = 80.0
 
     class _NeverReached(OptimizeService):
-        async def interpret(self, request):
+        async def interpret(self, request, deadline=None):
             raise AssertionError("the LLM must not be called for an infeasible scenario")
 
     app = create_app()
@@ -365,3 +365,142 @@ def test_prompt_injection_in_a_note_cannot_change_the_schema(public_cases):
     assert "battery_shutdown" not in allowed
     assert "UNTRUSTED DATA" in captured["system"]
     assert response.directive_interpretation[0].directive_type == "no_charge_window"
+
+
+# ------------------------------------------- feasibility-driven reinterpretation (P10)
+
+
+class _SequencedProvider:
+    """Serves a scripted list of model payloads, one per call."""
+
+    name = "sequenced"
+    model = "sequenced-1"
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    async def complete(self, *, system_prompt, user_payload, json_schema, timeout_s):
+        import json as _json
+
+        from app.llm.base import ProviderResponse
+
+        self.calls.append(user_payload)
+        payload = self.payloads.pop(0) if self.payloads else self.payloads
+        return ProviderResponse(content=_json.dumps(payload), model_version=self.model)
+
+    async def aclose(self):
+        return None
+
+
+def _impossible_interpretation(request, note_count):
+    """A legal but unschedulable reading: no grid import during a dark, high-demand hour."""
+    night_hour = next(
+        entry.hour for entry in request.canonical_hours() if entry.solar_kwh == 0 and entry.demand_kwh > 0
+    )
+    entries = [
+        {
+            "note_index": 0,
+            "applies": True,
+            "directive_type": "max_grid_window",
+            "structured_adjustment": {"hours": [night_hour], "max_grid_kwh": 0.0},
+            "explanation": "misread",
+        }
+    ]
+    entries += [
+        {
+            "note_index": index,
+            "applies": False,
+            "directive_type": "no_op",
+            "structured_adjustment": None,
+            "explanation": "",
+        }
+        for index in range(1, note_count)
+    ]
+    return {"directive_interpretation": entries}
+
+
+def test_an_infeasible_interpretation_earns_one_focused_reinterpretation(public_cases):
+    """The scenario is schedulable, so infeasibility points at the reading of the notes."""
+    import asyncio
+
+    from app.llm.interpreter import LlmDirectiveInterpreter
+
+    case = public_cases[0]
+    request = OptimizeRequest.model_validate(case["input"])
+    corrected = {"directive_interpretation": case["expected_output"]["directive_interpretation"]}
+
+    provider = _SequencedProvider(
+        [_impossible_interpretation(request, len(request.operator_notes)), corrected]
+    )
+    service = OptimizeService(interpreter=LlmDirectiveInterpreter(provider))
+
+    response = asyncio.run(service.run(request))
+
+    assert len(provider.calls) == 2, "exactly one reinterpretation, not a loop"
+    assert "IMPOSSIBLE SCHEDULE" in provider.calls[1]
+    assert "Do NOT weaken" in provider.calls[1]
+    # The corrected reading is the one that ends up in the response.
+    assert response.directive_interpretation[0].directive_type == "solar_reduction"
+    assert abs(response.total_cost_bdt - case["expected_output"]["total_cost_bdt"]) <= JUDGE_TOLERANCE
+    assert replay(request, response.directive_interpretation, response).ok
+
+
+def test_a_still_infeasible_reinterpretation_fails_closed(public_cases):
+    """Never relax a directive to force a plan: report the infeasibility instead."""
+    import asyncio
+
+    from app.llm.interpreter import LlmDirectiveInterpreter
+
+    case = public_cases[0]
+    request = OptimizeRequest.model_validate(case["input"])
+    impossible = _impossible_interpretation(request, len(request.operator_notes))
+
+    provider = _SequencedProvider([impossible, impossible])
+    service = OptimizeService(interpreter=LlmDirectiveInterpreter(provider))
+
+    with pytest.raises(DirectiveInfeasible):
+        asyncio.run(service.run(request))
+
+    assert len(provider.calls) == 2
+
+
+def test_a_feasible_first_interpretation_is_never_reinterpreted(public_cases):
+    """No wasted call, and no chance of a good reading being replaced by a worse one."""
+    import asyncio
+
+    from app.llm.interpreter import LlmDirectiveInterpreter
+
+    case = public_cases[0]
+    corrected = {"directive_interpretation": case["expected_output"]["directive_interpretation"]}
+    provider = _SequencedProvider([corrected])
+    service = OptimizeService(interpreter=LlmDirectiveInterpreter(provider))
+
+    response = asyncio.run(service.run(OptimizeRequest.model_validate(case["input"])))
+
+    assert len(provider.calls) == 1
+    assert response.total_cost_bdt == pytest.approx(
+        case["expected_output"]["total_cost_bdt"], abs=JUDGE_TOLERANCE
+    )
+
+
+def test_guardrail_rejection_is_repaired_before_the_optimizer_ever_runs(public_cases):
+    """A bad directive must never reach the compiler, even once."""
+    import asyncio
+    import copy as _copy
+
+    from app.llm.interpreter import LlmDirectiveInterpreter
+
+    case = public_cases[0]
+    broken = _copy.deepcopy(case["expected_output"]["directive_interpretation"])
+    broken[0]["structured_adjustment"]["factor"] = 1.8  # outside [0, 1]
+    corrected = {"directive_interpretation": case["expected_output"]["directive_interpretation"]}
+
+    provider = _SequencedProvider([{"directive_interpretation": broken}, corrected])
+    service = OptimizeService(interpreter=LlmDirectiveInterpreter(provider))
+
+    response = asyncio.run(service.run(OptimizeRequest.model_validate(case["input"])))
+
+    assert len(provider.calls) == 2
+    assert "factor_out_of_range" in provider.calls[1]
+    assert response.directive_interpretation[0].structured_adjustment.factor == 0.25

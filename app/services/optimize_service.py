@@ -32,13 +32,14 @@ from app.api.errors import (
     SolverFailure,
 )
 from app.config import Settings, get_settings
-from app.llm.base import InterpreterError
-from app.llm.interpreter import LlmDirectiveInterpreter, build_interpreter, coerce_to_canonical
+from app.llm.interpreter import LlmDirectiveInterpreter, build_interpreter
+from app.llm.repair import InterpretationRun, build_runner
 from app.optimizer.hybrid_solve import SolveOutcome, SolveStatus, hybrid_solve, screen_baseline_feasibility
 from app.optimizer.result import build_hourly_plan
 from app.schemas.directive import DirectiveInterpretation
 from app.schemas.request import OptimizeRequest
 from app.schemas.response import OptimizeResponse
+from app.services.deadline import Deadline
 from app.services.plan_summary import build_plan_summary
 from app.validation.replay import ValidationReport, replay
 from app.validation.request_semantics import check_note_length_limits, check_request_semantics
@@ -57,20 +58,36 @@ class OptimizeService:
         # Built once, not per request: the provider holds a pooled HTTP client, and a fresh TLS
         # handshake on every judged call would eat into the latency budget for nothing.
         self._interpreter = interpreter if interpreter is not None else build_interpreter(self._settings)
+        self._runner = build_runner(self._interpreter, self._settings)
+        #: Telemetry from the most recent interpretation, for the observability layer (P15).
+        self._last_run: InterpretationRun | None = None
 
     @property
     def interpreter(self) -> LlmDirectiveInterpreter | None:
         return self._interpreter
+
+    @property
+    def last_run(self) -> InterpretationRun | None:
+        return self._last_run
 
     async def aclose(self) -> None:
         if self._interpreter is not None:
             await self._interpreter.aclose()
 
     async def run(self, request: OptimizeRequest) -> OptimizeResponse:
+        deadline = Deadline.start(self._settings.hard_request_deadline_seconds)
+
         self.validate(request)
+        # Before the paid call: an impossible scenario is rejected here, and — just as
+        # importantly — proving it schedulable is what makes a later infeasibility evidence
+        # about the *interpretation* rather than about the request.
         self.screen_feasibility(request)
-        directives = await self.interpret(request)
-        return self.solve_and_build(request, directives)
+
+        directives = await self.interpret(request, deadline)
+        outcome, directives = await self._solve_with_feasibility_retry(request, directives, deadline)
+
+        self._raise_for_solve_status(outcome)
+        return self._finalize(request, directives, outcome)
 
     # ------------------------------------------------------------------ stages
 
@@ -109,7 +126,11 @@ class OptimizeService:
                 details=[f"baseline LP status: {screen.lp.status}"],
             )
 
-    async def interpret(self, request: OptimizeRequest) -> list[DirectiveInterpretation]:
+    async def interpret(
+        self,
+        request: OptimizeRequest,
+        deadline: Deadline | None = None,
+    ) -> list[DirectiveInterpretation]:
         """Interpret the operator notes with the language model.
 
         There is deliberately no keyword-matching fallback. A regex interpreter would defeat the
@@ -117,29 +138,67 @@ class OptimizeService:
         rather than guessing. The bounded, failure-class-specific retry policy lands in P10;
         today a single attempt is made and any failure becomes a controlled error.
         """
-        if self._interpreter is None:
+        if self._runner is None:
             raise InterpretationUnavailable("the directive interpreter is not configured")
 
-        try:
-            outcome = await self._interpreter.interpret(request)
-            # Untrusted until this passes. P9 replaces the shape gate with classified guardrails
-            # plus one bounded repair attempt.
-            return coerce_to_canonical(outcome.raw_items)
-        except InterpreterError as exc:
+        deadline = deadline or Deadline.start(self._settings.hard_request_deadline_seconds)
+        run = await self._runner.run(request, deadline)
+        self._last_run = run
+
+        if not run.ok:
             raise InterpretationUnavailable(
                 "The operator notes could not be interpreted.",
-                details=[type(exc).__name__],
-            ) from exc
+                details=run.failure_codes or [run.last_error or "interpretation failed"],
+            )
+        return run.directives
 
     def solve_and_build(
         self,
         request: OptimizeRequest,
         directives: Sequence[DirectiveInterpretation],
     ) -> OptimizeResponse:
-        """Compile, solve, canonicalize, replay, and return — or fail in a controlled way."""
+        """Compile, solve, canonicalize, replay, and return — or fail in a controlled way.
+
+        The synchronous path, used by the regression runner and by anything that already holds
+        validated directives. ``run()`` adds the feasibility reinterpretation around it.
+        """
         outcome = hybrid_solve(request, directives, self._settings)
         self._raise_for_solve_status(outcome)
+        return self._finalize(request, directives, outcome)
 
+    async def _solve_with_feasibility_retry(
+        self,
+        request: OptimizeRequest,
+        directives: Sequence[DirectiveInterpretation],
+        deadline: Deadline,
+    ) -> tuple[SolveOutcome, Sequence[DirectiveInterpretation]]:
+        """Solve, and on directive infeasibility allow exactly one focused reinterpretation.
+
+        The baseline screen already proved the scenario schedulable, so an infeasible result
+        points at the interpretation. The retry re-reads the original notes; it never relaxes a
+        constraint to manufacture feasibility. If the second reading is also infeasible, the
+        *first* outcome is kept and reported — a second wrong answer is not an improvement.
+        """
+        outcome = hybrid_solve(request, directives, self._settings)
+        if outcome.status is not SolveStatus.DIRECTIVE_INFEASIBLE or self._runner is None:
+            return outcome, directives
+
+        retry = await self._runner.reinterpret_for_feasibility(request, deadline)
+        self._last_run = retry
+        if not retry.ok:
+            return outcome, directives
+
+        retry_outcome = hybrid_solve(request, retry.directives, self._settings)
+        if retry_outcome.ok:
+            return retry_outcome, retry.directives
+        return outcome, directives
+
+    def _finalize(
+        self,
+        request: OptimizeRequest,
+        directives: Sequence[DirectiveInterpretation],
+        outcome: SolveOutcome,
+    ) -> OptimizeResponse:
         response, report = self._build_validated_response(request, directives, outcome)
         if response is None:
             raise ReplayInvariantFailure(

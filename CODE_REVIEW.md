@@ -28,7 +28,8 @@ None — this is the first review pass.
 
 #### R1-1 — `compile_directives()` and `derive_envelope()` disagree under `SOLAR_OVERLAP_POLICY=last_wins`
 
-- **Status:** OPEN
+- **Status:** FIXED — fix verified present by direct inspection 2026-09-18 (see "Verification log" below).
+  Not yet re-confirmed by a full `/code-review` pass; Review 2 should still re-check it.
 - **File:** [app/optimizer/compile_directives.py:250](app/optimizer/compile_directives.py#L250) (compiler side),
   `app/validation/replay.py:132` (`derive_envelope()`, replay side)
 - **Severity:** High — undermines the P2/P3 independence guarantee documented in `IMPLEMENTATION_TRACKER.md` D-09
@@ -61,7 +62,8 @@ None — this is the first review pass.
 
 #### R1-2 — Dead `elif` branch in `expand_window()`
 
-- **Status:** OPEN
+- **Status:** FIXED — fix verified present by direct inspection 2026-09-18 (see "Verification log" below).
+  Not yet re-confirmed by a full `/code-review` pass; Review 2 should still re-check it.
 - **File:** [app/policies/spec_gaps.py:499](app/policies/spec_gaps.py#L499)
 - **Severity:** Low — cosmetic/maintainability only, no behavioral impact.
 - **Summary:** The `elif end_hour == HOURS_IN_DAY:` branch can never execute: `end_hour == HOURS_IN_DAY` (24) only
@@ -79,7 +81,49 @@ None — this is the first review pass.
 
 ---
 
+## Verification log
+
+Records confirmations made **outside** a full review pass. These are targeted checks of a specific claim, not a
+re-review of the codebase, and they never substitute for the next pass re-checking the finding itself.
+
+### 2026-09-18 — R1-1 and R1-2 confirmed fixed in the working tree
+
+Both fixes were applied during the P6 session and annotated above as *fix applied, pending verification*. Both are
+now confirmed present in the committed code by direct inspection:
+
+| Finding | Evidence |
+|---|---|
+| R1-1 | `app/validation/replay.py:136` — `derive_envelope()` now iterates `sorted(directives, key=lambda item: item.note_index)`, matching the compiler's ordering, with an explanatory comment at line 132. "Last" now means "highest `note_index`" on both sides, so the resolution is order-independent. |
+| R1-2 | `app/policies/spec_gaps.py:88-91` — the unreachable `elif end_hour == HOURS_IN_DAY:` branch is gone; a comment explains that `end_hour == 24` is always covered by the ordinary forward case, since `start_hour <= 23`. |
+
+Suite state at the time of this check: **174 tests passing** (`python -m pytest`, 9.35 s, zero failures).
+
+> `ruff check .` was **not** verified in this check — `ruff` is not installed on either interpreter available in
+> this environment (Python 3.14 or 3.12), despite `IMPLEMENTATION_TRACKER.md` §1 listing it as present. The
+> tracker's "ruff clean" claim for P5/P6 is carried over unverified. Install `requirements-dev.txt` before relying
+> on it, and before the P19 CI phase makes it a gate.
+
+---
+
+## Unreviewed scope
+
+Review 1 covered the repository at commit `aa526c3` (P3 — directive compiler). Three feature commits have landed
+since and **have never been through a review pass**:
+
+| Commit | Phase | Principal new code |
+|---|---|---|
+| `58821e8` | P4 — shared LP/MILP model | `app/optimizer/model.py` |
+| `fedb14c` | P5 — solvers | `app/optimizer/lp_relaxation.py`, `milp_solver.py`, `hybrid_solve.py` |
+| `a715c42` | P6 — response builder | `app/optimizer/result.py`, `app/services/plan_summary.py`, rewritten `app/services/optimize_service.py` |
+
+This is the highest-value surface for Review 2: it contains the numerically delicate code (the rounding/precision
+ladder in `optimize_service.py`, the derive-don't-copy rules in `result.py`) and the three-way failure-class
+mapping in `hybrid_solve.py` that decides whether a bad request becomes a 422 or a 500.
+
+---
+
 ## Next review
 
 When `/code-review` is next run, append a **Review 2** section above this line following the same structure:
-re-check R1-1 and R1-2 first (mark `FIXED`/`STALE`/still `OPEN`), then list anything new as `R2-*`.
+re-check R1-1 and R1-2 first (confirm the `FIXED` status above, or reopen), then list anything new as `R2-*`.
+Prioritize the unreviewed P4–P6 code listed in the section above.
