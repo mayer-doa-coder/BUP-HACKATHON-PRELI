@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     log_raw_operator_notes: bool = False
     log_llm_raw_output: bool = False
 
+    @field_validator("llm_temperature", mode="before")
+    @classmethod
+    def _blank_temperature_means_omit(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:
