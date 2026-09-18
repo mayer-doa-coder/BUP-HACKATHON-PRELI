@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P4 COMPLETE — awaiting approval to start P5`
+**Status:** `P5 COMPLETE — awaiting approval to start P6`
 **Last updated:** 2026-09-18
-**Current phase:** P5 (not started)
-**Next action:** `T-050` (LP relaxation + baseline feasibility screen)
+**Current phase:** P6 (not started)
+**Next action:** `T-060` (numerical canonicalizer + response builder)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P5 — Solvers (not started) |
-| Last completed task | `T-040` (P4 complete) |
-| Next task | `T-050` |
-| Tests passing | 122 / 122, `ruff check .` clean |
+| Phase | P6 — Canonicalizer + response builder (not started) |
+| Last completed task | `T-052` (P5 complete) |
+| Next task | `T-060` |
+| Tests passing | 144 / 144, `ruff check .` clean |
 | Public cases passing | 0 / 10 |
 | Endpoint deployed | no |
 | Docker image | not built |
@@ -256,8 +256,8 @@ app/
 [ ] llm/base.py                 [ ] llm/interpreter.py      [ ] llm/prompts.py
 [ ] llm/providers/primary.py    [ ] llm/providers/backup.py [ ] llm/repair.py
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
-[x] optimizer/compile_directives.py     [x] optimizer/model.py         [ ] optimizer/lp_relaxation.py
-[ ] optimizer/milp_solver.py            [ ] optimizer/hybrid_solve.py  [ ] optimizer/result.py
+[x] optimizer/compile_directives.py     [x] optimizer/model.py         [x] optimizer/lp_relaxation.py
+[x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [ ] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
@@ -375,15 +375,26 @@ mode variable. 122 tests green, `ruff check .` clean.
 `linprog(method="highs")` and `scipy.optimize.milp` solves all 44 cases, `LP <= MILP` holds everywhere, and the MILP
 objective equals the published optimum exactly on every one. The model is sound before a single solver module exists.
 
-### P5 — Solvers `[ ]`
+### P5 — Solvers `[x]`
 
-- `[ ] T-050` `optimizer/lp_relaxation.py` — `linprog(method="highs")` with `yc, yd ∈ [0,1]`. Used for (a) the pre-LLM
-  baseline feasibility screen with no directives and (b) the directive-constrained relaxation.
-- `[ ] T-051` `optimizer/milp_solver.py` — `scipy.optimize.milp` with `yc, yd` binary and a time limit. Authoritative.
-- `[ ] T-052` `optimizer/hybrid_solve.py` — orchestration + the invariant `LP_cost <= MILP_cost + tol` + solver-status checks.
-  *Acceptance:* a baseline-infeasible scenario is detected before any LLM call; LP-infeasible-after-feasible-baseline is
-  reported as its own failure class; the MILP never returns simultaneous charge+discharge; the invariant is asserted on
-  every solve.
+- `[x] T-050` `optimizer/lp_relaxation.py` — `LpStatus` / `LpResult` / `solve_lp_relaxation()`. Solver problems become
+  **statuses, never exceptions**, so "impossible scenario" stays distinguishable from "solver broke".
+- `[x] T-051` `optimizer/milp_solver.py` — `MilpStatus` / `MilpResult` / `solve_milp()`, capturing `mip_gap` and
+  `mip_dual_bound` for diagnostics. A time-limited but feasible incumbent is *usable* (see the log note).
+- `[x] T-052` `optimizer/hybrid_solve.py` — `screen_baseline_feasibility()` (the pre-LLM screen) and `hybrid_solve()`,
+  returning `SolveOutcome` with a four-way `SolveStatus`: `OK`, `BASELINE_INFEASIBLE` (→ 422),
+  `DIRECTIVE_INFEASIBLE` (→ P10 reparse), `SOLVER_FAILURE` (→ 500). Three invariants gate every solution:
+  `LP <= MILP + tol`, model residuals within 1e-6, and no hour both charging and discharging.
+
+*Verified:* **all 44 reference cases reach the published optimum exactly**, MILP optimality proven on every one,
+`LP <= MILP` everywhere, directive bounds binding the *solved* plan rather than just the published one, and no
+simultaneous charge/discharge anywhere. Edge cases: zero-capacity battery, zero charge rate, a completely rigid
+battery, negative tariff (solves, cost goes negative, stays bounded), `factor=0.0`, both bans on one hour, and a zero
+grid cap (→ `DIRECTIVE_INFEASIBLE`). Failure injection confirms a crashing solver surfaces as `SOLVER_FAILURE` rather
+than a traceback, and an artificially inflated LP bound trips the invariant. 144 tests green, `ruff check .` clean.
+
+*Latency headroom:* baseline screen p50 3.3 ms, LP 3.0 ms, MILP 15.6 ms; worst observed baseline + hybrid total
+**39 ms** against the 4,500 ms budget. The LLM call will be the only meaningful latency cost in the pipeline.
 
 ### P6 — Canonicalizer, response builder, summary `[ ]`
 
@@ -697,3 +708,32 @@ Append one entry per working session, newest last. Keep entries short and factua
   matrices are right *before* any solver module exists; P5 turns that probe into committed regression tests.
 - Next session starts at `T-050`/`T-051`/`T-052`: LP relaxation (including the pre-LLM baseline feasibility screen),
   the authoritative MILP, and the hybrid orchestration that asserts the `LP <= MILP + tol` invariant and solver status.
+
+### 2026-09-18 — Session 7 (P5 — solvers)
+
+- `T-050`/`T-051`/`T-052` complete. 144 tests green, `ruff check .` clean. The P4 solver probe is now committed
+  regression coverage.
+- Consumes P3 and P4 unchanged: `hybrid_solve` compiles (P3), builds (P4), solves, and checks. Nothing earlier needed
+  editing, which is the payoff of keeping the compiler free of solver concerns and the model free of directive logic.
+- **Failures are statuses, not exceptions.** `SolveStatus` has four values because the pipeline needs three different
+  *responses* to failure: a baseline-infeasible scenario is a 422, a directive-infeasible one earns a bounded semantic
+  reparse in P10, and a solver fault is a 500. Raising a single exception would have collapsed that distinction and
+  forced the service to parse error strings. P6/P10 consume the enum.
+- **A time-limited but feasible MILP incumbent is accepted** (`FEASIBLE_NOT_PROVEN`), with `proven_optimal=False`
+  recorded. Reasoning from the rubric: a valid, slightly suboptimal plan still earns the 25 directive-application
+  points and partial optimization credit, whereas a 500 earns nothing on that case. Validity is never traded away —
+  the independent replay still has the final say. Guide §12.2's "require optimal" is the happy path, not the only one.
+- **Why MILP-infeasible-after-feasible-LP is a `SOLVER_FAILURE`, not a directive problem:** any relaxed solution that
+  charges and discharges in the same hour can be rewritten as the net movement, with identical energy balance, battery
+  state, and cost, and within the same rate limits. So a feasible relaxation always implies a feasible integral
+  solution here. Reaching that branch means the model or the solver is wrong. The same argument explains the observed
+  **zero LP→MILP gap on all 44 cases**: the binaries buy an *expressible* schedule (one `battery_action` per hour),
+  not a cheaper one. That is a property of this problem, not a shortcut — the MILP is still solved and still returned.
+- One test of mine was wrong, not the code: an invented 120 kWh evening cap genuinely makes SAMPLE-01 infeasible, so
+  the monotonicity property did not apply. Replaced with tightenings that are known-feasible (the organizers' own
+  directives, and a cap pinned to the unconstrained peak). Also renamed a test whose name claimed "infeasible" while
+  it asserted the opposite.
+- Solve path measured at ~39 ms worst case end to end, so the latency budget is essentially all LLM.
+- Next session starts at `T-060`/`T-061`/`T-062`: eps-canonicalization, per-hour action derivation, sequential state
+  reconstruction, 6–8 decimal serialization, parse-back, deterministic `plan_summary`, and wiring the service so the
+  P2 replay validator finally guards a real response.
