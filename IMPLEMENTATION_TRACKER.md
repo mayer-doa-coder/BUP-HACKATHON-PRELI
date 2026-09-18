@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P3 COMPLETE — awaiting approval to start P4`
+**Status:** `P4 COMPLETE — awaiting approval to start P5`
 **Last updated:** 2026-09-18
-**Current phase:** P4 (not started)
-**Next action:** `T-040` (shared LP/MILP model)
+**Current phase:** P5 (not started)
+**Next action:** `T-050` (LP relaxation + baseline feasibility screen)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P4 — Shared LP/MILP model (not started) |
-| Last completed task | `T-031` (P3 complete) |
-| Next task | `T-040` |
-| Tests passing | 106 / 106, `ruff check .` clean |
+| Phase | P5 — Solvers (not started) |
+| Last completed task | `T-040` (P4 complete) |
+| Next task | `T-050` |
+| Tests passing | 122 / 122, `ruff check .` clean |
 | Public cases passing | 0 / 10 |
 | Endpoint deployed | no |
 | Docker image | not built |
@@ -256,7 +256,7 @@ app/
 [ ] llm/base.py                 [ ] llm/interpreter.py      [ ] llm/prompts.py
 [ ] llm/providers/primary.py    [ ] llm/providers/backup.py [ ] llm/repair.py
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
-[x] optimizer/compile_directives.py     [ ] optimizer/model.py         [ ] optimizer/lp_relaxation.py
+[x] optimizer/compile_directives.py     [x] optimizer/model.py         [ ] optimizer/lp_relaxation.py
 [ ] optimizer/milp_solver.py            [ ] optimizer/hybrid_solve.py  [ ] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py
@@ -356,11 +356,24 @@ solar factors ⇒ `min(factor)` + ambiguity flag; `factor=0.0` / `max_grid_kwh=0
 a reserve above capacity fails closed. Window tests assert the canonical §04.2 examples separately from the provisional
 policies. 106 tests green, `ruff check .` clean.
 
-### P4 — Shared LP/MILP model `[ ]`
+### P4 — Shared LP/MILP model `[x]`
 
-- `[ ] T-040` `optimizer/model.py` — one variable layout (`g, s, c, d, E, yc, yd` = 168 vars) and one constraint builder
-  used by both stages (Guide §12).
-  *Acceptance:* dimension/index unit tests; a hand-built feasible plan satisfies `A_eq x = b_eq` within 1e-9.
+- `[x] T-040` `optimizer/model.py` — one variable layout (`g, s, c, d, E, yc, yd` = 168 vars, 49 equality rows,
+  72 inequality rows) and one constraint builder for both stages (Guide §12). `OptimizationModel` carries the
+  objective, both constraint blocks, bounds, and the `integrality` vector, plus `scipy_bounds()`, `cost_of()`,
+  `split()`, and `residuals()`. **There is no `stage` parameter** — the LP and MILP cannot be handed different
+  problems, which is what makes `LP_cost <= MILP_cost` meaningful. Directives enter purely as bounds; the module never
+  inspects a directive.
+
+*Verified:* all 44 published reference schedules are feasible points of the model as built (equality, inequality, and
+bound residuals all below 1e-9) and the objective reproduces every published `total_cost_bdt` to 1e-6. The residual
+check was probed to confirm it reacts (a +5 kWh grid nudge and a +12 kWh capacity breach are both measured exactly).
+Directive-to-bound tests cover solar upper bound, grid cap, reserve floor, and bans pinning **both** the amount and its
+mode variable. 122 tests green, `ruff check .` clean.
+
+*Solver probe (not yet a committed test — P5 formalizes it):* driving these matrices through
+`linprog(method="highs")` and `scipy.optimize.milp` solves all 44 cases, `LP <= MILP` holds everywhere, and the MILP
+objective equals the published optimum exactly on every one. The model is sound before a single solver module exists.
 
 ### P5 — Solvers `[ ]`
 
@@ -664,3 +677,23 @@ Append one entry per working session, newest last. Keep entries short and factua
   Inventing 24 hours of constraint from an ambiguous phrase is the more expensive error.
 - Next session starts at `T-040` (shared LP/MILP model): one variable layout and one constraint builder feeding both
   the relaxation and the authoritative MILP.
+
+### 2026-09-18 — Session 6 (P4 — shared LP/MILP model)
+
+- `T-040` complete. 122 tests green, `ruff check .` clean.
+- Direct continuation of P3: `build_model(request, compiled)` takes the `CompiledConstraints` the compiler produces,
+  and every directive reaches the solver as a **bound**. `model.py` never inspects a directive, so the taxonomy and
+  the mathematics stay on opposite sides of a clean seam.
+- **No `stage` parameter, deliberately.** LP and MILP share one objective, one `a_eq`/`b_eq`, one `a_ub`/`b_ub`, and
+  one set of bounds; the only difference is whether `integrality` is applied. If the two stages could be built
+  separately, `LP_cost <= MILP_cost` would compare two different problems and the invariant would be worthless.
+- Verified against organizer data rather than my own arithmetic: all 44 published reference schedules are feasible
+  points of the model (residuals < 1e-9) and the objective reproduces every published cost to 1e-6. As in P3, I probed
+  the check for sensitivity first — a +5 kWh grid nudge and a +12 kWh capacity breach are both measured exactly.
+- A ban pins **both** `c[h]` and `yc[h]` to zero (not just the amount). Leaving `yc` free would let the relaxation hold
+  fractional permission to charge, which is harmless for the objective but muddies the LP diagnostics P5 depends on.
+- Ran an out-of-band solver probe to de-risk P5: `linprog(method="highs")` and `scipy.optimize.milp` solve all 44
+  cases, `LP <= MILP` holds everywhere, and the MILP objective equals the published optimum on every case. So the
+  matrices are right *before* any solver module exists; P5 turns that probe into committed regression tests.
+- Next session starts at `T-050`/`T-051`/`T-052`: LP relaxation (including the pre-LLM baseline feasibility screen),
+  the authoritative MILP, and the hybrid orchestration that asserts the `LP <= MILP + tol` invariant and solver status.
