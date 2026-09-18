@@ -8,6 +8,8 @@ judge-shaped traffic is never affected.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -16,24 +18,53 @@ from starlette.responses import Response
 
 from app.api.errors import CORRELATION_ID_HEADER, RequestTooLarge, error_response
 from app.config import Settings
+from app.observability import metrics
+from app.observability.logging import bind_correlation_id
+from app.observability.trace import clear_trace, start_trace
 from app.services.deadline import Deadline
+
+logger = logging.getLogger("gridwise.request")
 
 HEALTH_PATH = "/health"
 
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
-    """Attach a correlation ID to every request and echo it on every response.
+    """Attach a correlation ID, open the request trace, and emit one summary line per request.
 
-    Registered outermost so that even a rejection from the body-size middleware carries an
-    ID the team can grep for in the logs.
+    Registered outermost so that even a rejection from the body-size or concurrency middleware
+    carries an ID the team can grep for, and so the recorded duration is the one the caller
+    actually experienced rather than the time spent inside the handler.
     """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         correlation_id = uuid.uuid4().hex
         request.state.correlation_id = correlation_id
-        response = await call_next(request)
-        response.headers[CORRELATION_ID_HEADER] = correlation_id
-        return response
+        bind_correlation_id(correlation_id)
+
+        endpoint = request.url.path
+        trace = start_trace(correlation_id=correlation_id, endpoint=endpoint)
+
+        metrics.active_requests.inc()
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[CORRELATION_ID_HEADER] = correlation_id
+            return response
+        finally:
+            elapsed = time.perf_counter() - started
+            metrics.active_requests.dec()
+            metrics.requests_total.inc(labels=(endpoint, str(status_code)))
+            metrics.request_duration_seconds.observe(elapsed, labels=(endpoint,))
+
+            trace.http_status = status_code
+            trace.total_latency_ms = elapsed * 1000.0
+            # One structured line per request, carrying the whole sanitized trace: no note text,
+            # no prompts, no provider payloads.
+            if endpoint != HEALTH_PATH:
+                logger.info("request completed", extra=trace.as_log_fields())
+            clear_trace()
 
 
 class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):

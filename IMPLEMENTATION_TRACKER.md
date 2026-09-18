@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P14 COMPLETE — awaiting approval to start P15`
+**Status:** `P15 COMPLETE — awaiting approval to start P16`
 **Last updated:** 2026-09-18
-**Current phase:** P15 (not started)
-**Next action:** `T-150` (structured logging and metrics)
+**Current phase:** P16 (Docker already done in session 11; deployment remains)
+**Next action:** `T-162` (deploy and verify from an external network)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P15 — Observability (not started) |
-| Last completed task | `T-141` (P14 complete) |
-| Next task | `T-150` |
-| Tests passing | 408 / 408 (+2 `live` deselected), `ruff check .` clean |
+| Phase | P16 — Deployment (Docker done, deploy pending) |
+| Last completed task | `T-151` (P15 complete) |
+| Next task | `T-162` |
+| Tests passing | 441 / 441 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
 | Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
@@ -260,7 +260,8 @@ app/
 [x] optimizer/milp_solver.py            [x] optimizer/hybrid_solve.py  [x] optimizer/result.py
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py   [x] services/plan_summary.py   [x] services/deadline.py
-[ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
+[x] observability/logging.py    [x] observability/metrics.py  [x] observability/trace.py
+[x] observability/record.py
 [x] cache/request_cache.py
 [ ] demo/routes.py              [ ] demo/models.py
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
@@ -606,11 +607,30 @@ empty. A corrected interpretation from the feasibility repair replaces the cache
 (peak ≤ 2 under 6 parallel requests), `/health` answers while the optimizer is saturated, and a saturated service
 returns 503 rather than overrunning the timeout.
 
-### P15 — Observability `[ ]`
+### P15 — Observability `[x]`
 
-- `[ ] T-150` Structured JSON logging with correlation IDs and the field list in Guide §23. Raw notes, prompts, provider
-  payloads, and secrets are never logged at INFO.
-- `[ ] T-151` Prometheus-style counters and histograms (Guide §23 metric list).
+- `[x] T-150` `observability/logging.py` — `JsonLogFormatter` (one JSON object per line, `extra` fields merged),
+  a **context-local** correlation ID, `QuietThirdPartyFilter`, and `redact_note()` / `redact_model_output()` which
+  finally honour the `LOG_RAW_OPERATOR_NOTES` / `LOG_LLM_RAW_OUTPUT` flags defined back in P0 and unused until now.
+  Replaces P1's `logging.basicConfig` placeholder.
+- `[x] T-151` `observability/metrics.py` — a small Prometheus-compatible registry (Counter / Gauge / Histogram plus
+  text exposition) covering the Guide §23 list, with `/metrics` on a **separate router** gated by `METRICS_ENABLED`.
+  `observability/record.py` is the single bridge from pipeline results to trace and metrics;
+  `observability/trace.py` holds the per-request `RequestTrace`.
+
+*Verified:* 33 tests. Leak checks first: a note is redacted to a stable hash plus length, model output likewise, a
+traceback never reaches a log line, and a full request's logs are asserted to contain none of its note text. Metrics
+are proven to actually move under real traffic (request counters by status, duration histograms, LP/MILP timers, cache
+hit/miss), the active gauge returns to zero, `/metrics` exposes the registry, and it can be switched off. The trace is
+asserted to carry the Guide §23 diagnostics end to end (provider, model version, attempts, all three solver statuses,
+validator status, versions), and a failure stamps its code.
+
+> **No new dependency.** `prometheus_client` is not installed, and adding a package for three metric types would mean
+> another wheel to pin and re-verify inside the image. The text exposition format is stable and the registry is ~120
+> lines, so this stays swappable if that trade ever changes.
+
+> **Latency buckets are chosen around the scored thresholds** — 4.5 s (internal target) and 5 s (full-credit cutoff)
+> are explicit bucket bounds, so p95 reads against the rubric directly instead of being interpolated.
 
 ### P16 — Docker & deployment `[ ]`
 
@@ -1036,3 +1056,28 @@ Append one entry per working session, newest last. Keep entries short and factua
   plus Prometheus-style counters and histograms. Telemetry the layers below already collect —
   `InterpretationRun` (attempts, repairs, cache_hit, model version), `SolveOutcome`, `ValidationReport`, and both
   `CacheStats` — is waiting to be surfaced.
+
+### 2026-09-18 — Session 13 (P15 — observability)
+
+- `T-150`/`T-151` complete. 441 tests green (2 `live` deselected), `ruff check .` clean, regression 10/10.
+- Checked for collisions before writing anything, and found five: P1's `logging.basicConfig` placeholder, the two
+  `LOG_RAW_*` flags defined in P0 and never used, `extra=` log fields in `errors.py` and `repair.py` that a plain
+  formatter silently discards, and no `prometheus_client` in the pinned dependency set.
+- **A latent concurrency bug from P10 was fixed, not built upon.** `OptimizeService._last_run` stored per-request
+  telemetry on a *process-wide singleton*, so two concurrent requests would overwrite each other's diagnostics.
+  Harmless while nothing read it — but P15's whole job is reading it. Replaced with a context-local `RequestTrace`
+  (context variables are task-local under asyncio), and a test runs two overlapping requests to prove the traces stay
+  separate. `last_run` was removed rather than left as a racy convenience.
+- The correlation ID travels in a `ContextVar` rather than through every function signature, so a line logged deep in
+  the optimizer still carries the right request's ID.
+- **Third-party log quieting is prefix-based, and that mattered:** the installed client registers as `httpx2`, which
+  an exact-name list missed entirely — the first smoke test was still full of per-request httpx lines. It is now a
+  handler filter, so loggers created *after* configuration are covered too.
+- Deliberately no new dependency for metrics. A ~120-line registry beats another wheel to pin, install and re-verify
+  inside the image. Latency buckets include 4.5 s and 5 s so p95 can be read straight against the rubric.
+- `/metrics` lives on its own router behind `METRICS_ENABLED` and is asserted to be switchable off: the judged
+  surface stays exactly the two endpoints the Problem Statement defines.
+- `/health` is counted in metrics but **not** trace-logged — the probe runs constantly and would drown real traffic.
+- Next session is the rest of P16: `T-162`, deploying and verifying from an external network. The image, compose file,
+  `DOCKER.md` and `verify_docker.py` already exist from session 11. **O-01 (provider + pinned model snapshot) and
+  O-03 (hosting platform) are the remaining blockers.**

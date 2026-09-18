@@ -34,7 +34,16 @@ from app.api.errors import (
 from app.cache.request_cache import TtlLruCache, build_cache, response_cache_key
 from app.config import Settings, get_settings
 from app.llm.interpreter import LlmDirectiveInterpreter, build_interpreter
-from app.llm.repair import InterpretationRun, build_runner
+from app.llm.repair import build_runner
+from app.observability.record import (
+    record_baseline,
+    record_interpretation,
+    record_replay,
+    record_response_cache,
+    record_solve,
+    record_versions,
+)
+from app.observability.trace import current_trace
 from app.optimizer.hybrid_solve import SolveOutcome, SolveStatus, hybrid_solve, screen_baseline_feasibility
 from app.optimizer.result import build_hourly_plan
 from app.schemas.directive import DirectiveInterpretation
@@ -61,8 +70,6 @@ class OptimizeService:
         self._interpreter = interpreter if interpreter is not None else build_interpreter(self._settings)
         self._runner = build_runner(self._interpreter, self._settings)
         self._response_cache: TtlLruCache[OptimizeResponse] = build_cache(self._settings)
-        #: Telemetry from the most recent interpretation, for the observability layer (P15).
-        self._last_run: InterpretationRun | None = None
 
     @property
     def response_cache(self) -> TtlLruCache[OptimizeResponse]:
@@ -71,10 +78,6 @@ class OptimizeService:
     @property
     def interpreter(self) -> LlmDirectiveInterpreter | None:
         return self._interpreter
-
-    @property
-    def last_run(self) -> InterpretationRun | None:
-        return self._last_run
 
     async def aclose(self) -> None:
         if self._interpreter is not None:
@@ -89,10 +92,17 @@ class OptimizeService:
         # queueing behind the concurrency limit counts against the same 30 s the judge allows.
         deadline = deadline or Deadline.start(self._settings.hard_request_deadline_seconds)
 
+        record_versions(self._settings)
+        trace = current_trace()
+        if trace is not None:
+            trace.scenario_id = request.scenario_id
+            trace.note_count = len(request.operator_notes)
+
         self.validate(request)
 
         cache_key = response_cache_key(request, self._settings)
         cached = self._response_cache.get(cache_key)
+        record_response_cache(cached is not None)
         if cached is not None:
             # Stored only after independent replay accepted it, so serving it needs no rework.
             return cached
@@ -142,6 +152,7 @@ class OptimizeService:
         interpretation rather than at the request.
         """
         screen = screen_baseline_feasibility(request, self._settings)
+        record_baseline(screen)
         if not screen.feasible:
             raise SemanticallyInvalidRequest(
                 "The scenario cannot be scheduled even before any operator directive is applied.",
@@ -165,7 +176,7 @@ class OptimizeService:
 
         deadline = deadline or Deadline.start(self._settings.hard_request_deadline_seconds)
         run = await self._runner.run(request, deadline)
-        self._last_run = run
+        record_interpretation(run)
 
         if not run.ok:
             raise InterpretationUnavailable(
@@ -185,6 +196,7 @@ class OptimizeService:
         validated directives. ``run()`` adds the feasibility reinterpretation around it.
         """
         outcome = hybrid_solve(request, directives, self._settings)
+        record_solve(outcome)
         self._raise_for_solve_status(outcome)
         return self._finalize(request, directives, outcome)
 
@@ -202,15 +214,17 @@ class OptimizeService:
         *first* outcome is kept and reported — a second wrong answer is not an improvement.
         """
         outcome = hybrid_solve(request, directives, self._settings)
+        record_solve(outcome)
         if outcome.status is not SolveStatus.DIRECTIVE_INFEASIBLE or self._runner is None:
             return outcome, directives
 
         retry = await self._runner.reinterpret_for_feasibility(request, deadline)
-        self._last_run = retry
+        record_interpretation(retry)
         if not retry.ok:
             return outcome, directives
 
         retry_outcome = hybrid_solve(request, retry.directives, self._settings)
+        record_solve(retry_outcome)
         if retry_outcome.ok:
             # Replace the cached interpretation with the corrected one, so an identical request
             # does not pay for the same reinterpretation again. It passed the same guardrails.
@@ -275,6 +289,7 @@ class OptimizeService:
             # Replay the parsed-back representation, which is exactly what the judge will read.
             parsed = OptimizeResponse.model_validate_json(candidate.model_dump_json())
             report = replay(request, directives, parsed, settings=self._settings)
+            record_replay(report)
             if report.ok:
                 return parsed, report
         return None, report

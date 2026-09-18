@@ -113,6 +113,19 @@ class ReplayInvariantFailure(GridWiseError):
     code = "replay_invariant_failure"
 
 
+def _stamp_failure(code: str) -> None:
+    """Record the failure class on the request trace, if one is open.
+
+    Imported lazily: the observability layer imports from the pipeline, and a module-level
+    import here would close a cycle.
+    """
+    from app.observability.trace import current_trace
+
+    trace = current_trace()
+    if trace is not None:
+        trace.failure_code = code
+
+
 def correlation_id_of(request: Request) -> str:
     """The request's correlation ID, or a fresh one if the middleware did not run."""
     existing = getattr(request.state, "correlation_id", None)
@@ -169,6 +182,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _handle_request_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
         # This is the override that turns FastAPI's default 422 into the contract's 400.
         correlation_id = correlation_id_of(request)
+        _stamp_failure(StructurallyInvalidRequest.code)
         details = _sanitize_validation_errors(exc)
         logger.info(
             "structurally invalid request",
@@ -186,6 +200,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _handle_gridwise_error(request: Request, exc: GridWiseError) -> JSONResponse:
         correlation_id = correlation_id_of(request)
         is_server_error = exc.http_status >= 500
+        _stamp_failure(exc.code)
         logger.log(
             logging.ERROR if is_server_error else logging.INFO,
             "request failed: %s",
@@ -215,6 +230,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         correlation_id = correlation_id_of(request)
+        _stamp_failure("internal_error")
         # exc_info stays in the server log; the caller sees only the correlation ID.
         logger.exception("unhandled error", extra={"correlation_id": correlation_id})
         return error_response(

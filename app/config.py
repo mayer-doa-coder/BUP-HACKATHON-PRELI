@@ -117,6 +117,8 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------ diagnostics
     app_commit_sha: str = ""
+    # Operational metrics on /metrics. Separate router, never part of the judged contract.
+    metrics_enabled: bool = True
     judge_mode: bool = True
     demo_mode: bool = False
     log_level: str = "INFO"

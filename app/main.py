@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -15,8 +14,9 @@ from app.api.middleware import (
     ConcurrencyLimitMiddleware,
     CorrelationIdMiddleware,
 )
-from app.api.routes import get_optimize_service, router
+from app.api.routes import get_optimize_service, metrics_router, router
 from app.config import Settings, get_settings
+from app.observability.logging import configure_logging
 
 
 @asynccontextmanager
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    logging.basicConfig(level=settings.log_level)
+    configure_logging(settings)
 
     app = FastAPI(
         title="GridWise",
@@ -51,6 +51,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(router)
+    if settings.metrics_enabled:
+        # Operational only, and on its own router: the judged surface stays exactly the two
+        # endpoints the Problem Statement defines.
+        app.include_router(metrics_router)
     return app
 
 
