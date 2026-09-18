@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P1 COMPLETE — awaiting approval to start P2`
+**Status:** `P2 COMPLETE — awaiting approval to start P3`
 **Last updated:** 2026-09-18
-**Current phase:** P2 (not started)
-**Next action:** `T-020` (independent replay validator)
+**Current phase:** P3 (not started)
+**Next action:** `T-030` (directive compiler)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P2 — Independent replay validator (not started) |
-| Last completed task | `T-013` (P1 complete) |
-| Next task | `T-020` |
-| Tests passing | 38 / 38, `ruff check .` clean |
+| Phase | P3 — Directive compiler (not started) |
+| Last completed task | `T-021` (P2 complete) |
+| Next task | `T-030` |
+| Tests passing | 64 / 64, `ruff check .` clean |
 | Public cases passing | 0 / 10 |
 | Endpoint deployed | no |
 | Docker image | not built |
@@ -258,7 +258,7 @@ app/
 [ ] guardrails/directive_validator.py   [ ] guardrails/normalizer.py   [ ] guardrails/conflict_checks.py
 [ ] optimizer/compile_directives.py     [ ] optimizer/model.py         [ ] optimizer/lp_relaxation.py
 [ ] optimizer/milp_solver.py            [ ] optimizer/hybrid_solve.py  [ ] optimizer/result.py
-[ ] validation/replay.py        [ ] validation/totals.py
+[x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
 [ ] cache/request_cache.py
@@ -317,15 +317,25 @@ canonical models unchanged; the serialized HTTP body carries exactly seven field
 404/405 stay inside the error envelope. Live `uvicorn` smoke test passed (health, 400, 422, 500 paths).
 38 tests green, `ruff check .` clean.
 
-### P2 — Independent replay validator `[ ]`
+### P2 — Independent replay validator `[x]`
 
-- `[ ] T-020` `validation/replay.py` — the checks in Guide §15, written **without** importing the optimizer or the
-  canonicalizer. Returns a `ValidationReport` (ok, violations, max_balance_error, max_state_error, final_energy_error,
-  recalculated totals).
-- `[ ] T-021` `validation/totals.py` — totals recomputed strictly from the plan.
-  *Acceptance:* each of the 10 public reference plans replays PASS against its own ground-truth directives; ~15 mutation
-  fixtures (break balance, break state, exceed rate, dip below reserve, overuse solar, exceed grid cap, charge during a
-  ban, non-zero `battery_kwh` on `idle`, final SoC ≠ initial, wrong totals) each replay FAIL with the right violation.
+- `[x] T-020` `validation/replay.py` — `ViolationCode` (21 stable codes), `Violation`, `ValidationReport`,
+  `ConstraintEnvelope`, `derive_envelope()`, and `replay()`. Every check in Guide §15 plus the Problem Statement §11.3
+  consistency list. **It derives the constraint envelope itself** rather than calling the optimizer's compiler — see
+  the note below.
+- `[x] T-021` `validation/totals.py` — `recalculate_totals()` using `math.fsum`, keyed by hour number rather than
+  array position.
+
+*Verified:* all 10 public **and** all 34 extended reference plans replay clean — at 0.01, at 1e-6, and still at 1e-9,
+so the envelope derivation agrees with organizer ground truth at machine precision, not merely inside judge tolerance.
+Those 44 plans cover every directive type (solar 12, grid cap 12, no_op 11, no-charge 11, reserve 11, no-discharge 8).
+20 mutation tests each fail with the expected `ViolationCode`, including one mutation per directive type (charge in a
+ban window, discharge in a ban window, grid over cap, dip below a directive reserve, pre-reduction solar use).
+An AST-level test asserts `replay.py` imports nothing from `app.optimizer`. 64 tests green, `ruff check .` clean.
+
+> **Do not merge `derive_envelope()` into the P3 compiler.** They are two independent implementations of the same
+> rules on purpose (D-09). If the compiler called replay's version, or vice versa, a composition bug would build the
+> plan and then approve it. P7 cross-checks them against real cases; a disagreement there is a genuine defect.
 
 ### P3 — Directive compiler `[ ]`
 
@@ -600,3 +610,24 @@ Append one entry per working session, newest last. Keep entries short and factua
 - Known rough edge, deferred to P15: `logging.basicConfig` at INFO makes `httpx`/`uvicorn` noisy. Structured logging
   with per-logger levels replaces it.
 - Next session starts at `T-020` (independent replay validator).
+
+### 2026-09-18 — Session 4 (P2 — independent replay validator)
+
+- `T-020`/`T-021` complete. 64 tests green, `ruff check .` clean.
+- Builds directly on P1: replay consumes the typed `OptimizeResponse` from P1 (so it validates what actually goes over
+  the wire), reads the spec-gap policy from the P0 `Settings`, and raises nothing itself — the service turns a failed
+  report into `ReplayInvariantFailure`, the 500 class already defined in P1's error taxonomy.
+- **The independence decision cost real duplication and is worth it.** `derive_envelope()` re-implements directive
+  composition instead of importing the (not yet written) compiler. Guide §15's pseudocode calls `compile_directives`,
+  but doing that would let one buggy composition both build and bless a plan. The duplication is now guarded by an
+  AST test that fails if `replay.py` ever imports `app.optimizer`.
+- Strong evidence, not just green ticks: all 44 published reference plans (10 public + 34 extended) replay clean at
+  **1e-9**, three orders tighter than the internal tolerance and seven tighter than the judge's. That says the envelope
+  rules match organizer ground truth exactly, across all six directive types.
+- Mutation tests deliberately bypass the P1 response-model validators with `model_construct` where the mutation is one
+  the schema itself would reject (negative grid, idle-with-magnitude). Otherwise Pydantic would catch it first and the
+  test would prove nothing about replay.
+- Replay carries the *reported* battery energy forward rather than its own recomputed value, so one bad hour surfaces
+  as a single `state_transition` violation instead of cascading into 23 misleading ones.
+- Next session starts at `T-030` (directive compiler) — the second, independent implementation of the same composition
+  rules, plus `policies/spec_gaps.py`.
