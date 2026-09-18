@@ -10,7 +10,11 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api.errors import register_exception_handlers
-from app.api.middleware import BodySizeLimitMiddleware, CorrelationIdMiddleware
+from app.api.middleware import (
+    BodySizeLimitMiddleware,
+    ConcurrencyLimitMiddleware,
+    CorrelationIdMiddleware,
+)
 from app.api.routes import get_optimize_service, router
 from app.config import Settings, get_settings
 
@@ -37,8 +41,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Starlette runs the most recently added middleware outermost, so the correlation ID is
-    # attached before the size check and is therefore present on a rejection too.
+    # Starlette runs the most recently added middleware outermost, so this list is effectively
+    # bottom-up: correlation ID first (so every rejection carries one), then the body-size
+    # check (cheap, rejects before parsing), then the concurrency gate, which is where a
+    # request may wait and where its time budget starts.
+    app.add_middleware(ConcurrencyLimitMiddleware, settings=settings)
     app.add_middleware(BodySizeLimitMiddleware, settings=settings)
     app.add_middleware(CorrelationIdMiddleware)
 

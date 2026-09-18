@@ -31,6 +31,7 @@ from app.api.errors import (
     SemanticallyInvalidRequest,
     SolverFailure,
 )
+from app.cache.request_cache import TtlLruCache, build_cache, response_cache_key
 from app.config import Settings, get_settings
 from app.llm.interpreter import LlmDirectiveInterpreter, build_interpreter
 from app.llm.repair import InterpretationRun, build_runner
@@ -59,8 +60,13 @@ class OptimizeService:
         # handshake on every judged call would eat into the latency budget for nothing.
         self._interpreter = interpreter if interpreter is not None else build_interpreter(self._settings)
         self._runner = build_runner(self._interpreter, self._settings)
+        self._response_cache: TtlLruCache[OptimizeResponse] = build_cache(self._settings)
         #: Telemetry from the most recent interpretation, for the observability layer (P15).
         self._last_run: InterpretationRun | None = None
+
+    @property
+    def response_cache(self) -> TtlLruCache[OptimizeResponse]:
+        return self._response_cache
 
     @property
     def interpreter(self) -> LlmDirectiveInterpreter | None:
@@ -74,10 +80,23 @@ class OptimizeService:
         if self._interpreter is not None:
             await self._interpreter.aclose()
 
-    async def run(self, request: OptimizeRequest) -> OptimizeResponse:
-        deadline = Deadline.start(self._settings.hard_request_deadline_seconds)
+    async def run(
+        self,
+        request: OptimizeRequest,
+        deadline: Deadline | None = None,
+    ) -> OptimizeResponse:
+        # The deadline may already have been started by the middleware, so that time spent
+        # queueing behind the concurrency limit counts against the same 30 s the judge allows.
+        deadline = deadline or Deadline.start(self._settings.hard_request_deadline_seconds)
 
         self.validate(request)
+
+        cache_key = response_cache_key(request, self._settings)
+        cached = self._response_cache.get(cache_key)
+        if cached is not None:
+            # Stored only after independent replay accepted it, so serving it needs no rework.
+            return cached
+
         # Before the paid call: an impossible scenario is rejected here, and — just as
         # importantly — proving it schedulable is what makes a later infeasibility evidence
         # about the *interpretation* rather than about the request.
@@ -87,7 +106,10 @@ class OptimizeService:
         outcome, directives = await self._solve_with_feasibility_retry(request, directives, deadline)
 
         self._raise_for_solve_status(outcome)
-        return self._finalize(request, directives, outcome)
+        response = self._finalize(request, directives, outcome)
+        # Only a replay-validated response reaches this line; _finalize raises otherwise.
+        self._response_cache.set(cache_key, response)
+        return response
 
     # ------------------------------------------------------------------ stages
 
@@ -190,6 +212,9 @@ class OptimizeService:
 
         retry_outcome = hybrid_solve(request, retry.directives, self._settings)
         if retry_outcome.ok:
+            # Replace the cached interpretation with the corrected one, so an identical request
+            # does not pay for the same reinterpretation again. It passed the same guardrails.
+            self._runner.remember(request, retry.directives)
             return retry_outcome, retry.directives
         return outcome, directives
 

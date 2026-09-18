@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.schemas.request import OptimizeRequest
 from app.schemas.response import OptimizeResponse
@@ -38,8 +38,15 @@ ServiceDependency = Annotated[OptimizeService, Depends(get_optimize_service)]
 
 
 @router.post("/optimize-energy", response_model=OptimizeResponse, tags=["optimize"])
-async def optimize_energy(payload: OptimizeRequest, service: ServiceDependency) -> OptimizeResponse:
-    return await service.run(payload)
+async def optimize_energy(
+    payload: OptimizeRequest,
+    service: ServiceDependency,
+    http_request: Request,
+) -> OptimizeResponse:
+    # The concurrency middleware starts the budget before queueing, so the pipeline inherits it
+    # rather than starting a fresh 28 s after an unknown wait.
+    deadline = getattr(http_request.state, "deadline", None)
+    return await service.run(payload, deadline=deadline)
 
 
 __all__ = ["get_optimize_service", "router"]

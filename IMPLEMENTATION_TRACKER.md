@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P11 + P12 + P13 COMPLETE, Docker pulled forward — awaiting approval to start P14`
+**Status:** `P14 COMPLETE — awaiting approval to start P15`
 **Last updated:** 2026-09-18
-**Current phase:** P14 (not started)
-**Next action:** `T-140` (cache, budgets, resource protection)
+**Current phase:** P15 (not started)
+**Next action:** `T-150` (structured logging and metrics)
 
 ---
 
@@ -57,10 +57,10 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P14 — Cache, budgets, resource protection (not started) |
-| Last completed task | `T-131` (P11-P13 complete; P16 Docker pulled forward) |
-| Next task | `T-140` |
-| Tests passing | 366 / 366 (+2 `live` deselected), `ruff check .` clean |
+| Phase | P15 — Observability (not started) |
+| Last completed task | `T-141` (P14 complete) |
+| Next task | `T-150` |
+| Tests passing | 408 / 408 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
 | Docker image | Dockerfile + compose + verify script written; **not yet built** (no Docker daemon on this machine) |
@@ -261,7 +261,7 @@ app/
 [x] validation/replay.py        [x] validation/totals.py
 [x] services/optimize_service.py   [x] services/plan_summary.py   [x] services/deadline.py
 [ ] observability/logging.py    [ ] observability/metrics.py  [ ] observability/trace.py
-[ ] cache/request_cache.py
+[x] cache/request_cache.py
 [ ] demo/routes.py              [ ] demo/models.py
 [x] policies/spec_gaps.py       # D-12: cross-midnight, through, single-hour, solar overlap
 
@@ -583,13 +583,28 @@ simply does not apply — a lesson carried over from P5.
 > the optimal cost, which is impossible for nested feasible sets. Now pinned to exact optimality with
 > `MILP_RELATIVE_GAP=0.0`, with a regression test asserting `mip_gap == 0` and MILP == LP bound.
 
-### P14 — Cache, budgets, resource protection `[ ]`
+### P14 — Cache, budgets, resource protection `[x]`
 
-- `[ ] T-140` `cache/request_cache.py` — parser cache keyed on notes + battery context + provider + exact model +
-  `PROMPT_VERSION` + `SCHEMA_VERSION`; full-response cache additionally on the canonical request + `OPTIMIZER_VERSION` +
-  commit SHA. Cache only guardrail-valid interpretations and replay-valid responses.
-- `[ ] T-141` Deadlines (4.5 s soft / 28 s hard), body-size and note-length limits, request and LLM concurrency semaphores.
-  *Acceptance:* the "same note, different battery capacity" collision test must miss the cache, not hit it.
+- `[x] T-140` `cache/request_cache.py` — `TtlLruCache` (bounded LRU + TTL, lock-guarded, disabled cleanly at size 0),
+  `parser_cache_key()`, `response_cache_key()`, `canonical_request_json()`. **The parser key hashes the literal
+  prompt text** rather than a hand-listed set of fields, so every battery field, the note wording, the note order and
+  any prompt edit necessarily change it — a field cannot be forgotten. Versions are hashed separately so a
+  `PROMPT_VERSION` bump invalidates even when the rendered text is unchanged. Segments are length-prefixed, so
+  `("ab","c")` and `("a","bc")` cannot collide.
+- `[x] T-141` `ConcurrencyLimitMiddleware` — request-level semaphore that **queues rather than rejects**, plus a
+  separate LLM semaphore inside `InterpretationRunner` (the provider has its own quota). `/health` bypasses the gate
+  entirely. The middleware **starts the `Deadline` before queueing** and the route passes it into the service, so time
+  spent waiting counts against the same 30 s the judge allows; a slot that cannot be had in budget yields a controlled
+  503 `service_busy`. Body-size and note-length limits were already in place from P1.
+
+*Verified:* 42 tests. Key correctness is the bulk of it: **all five** battery fields change the parser key (not just
+capacity — all five reach the prompt), as do note text, note order, provider, model, prompt and schema versions, and a
+prompt edit made *without* a version bump. The 24-hour matrix correctly does **not** affect the parser key (it never
+reaches the model), while `scenario_id` and tariffs **do** affect the response key, and shuffled hours do not. Nothing
+invalid is ever cached: guardrail failures, provider outages and infeasible interpretations all leave both caches
+empty. A corrected interpretation from the feasibility repair replaces the cached one. LLM concurrency is capped
+(peak ≤ 2 under 6 parallel requests), `/health` answers while the optimizer is saturated, and a saturated service
+returns 503 rather than overrunning the timeout.
 
 ### P15 — Observability `[ ]`
 
@@ -991,3 +1006,33 @@ Append one entry per working session, newest last. Keep entries short and factua
   and dropping a real directive because it looked suspicious would lose the case. Defence is structural instead.
 - Next session starts at `T-140`: parser/response caching with version-aware keys, request budgets, and concurrency
   limits. **O-01 (provider + pinned model) is now the main blocker** for live semantic accuracy and deployment.
+
+### 2026-09-18 — Session 12 (P14 — caching, budgets, concurrency)
+
+- `T-140`/`T-141` complete. 408 tests green (2 `live` deselected), `ruff check .` clean, regression 10/10.
+- **The parser cache key hashes the prompt text itself.** Guide §21 says to include "relevant battery context", but I
+  checked what the prompt actually carries and it is *all five* battery fields, not just capacity. Enumerating them by
+  hand is a bug waiting to happen — add a field to the prompt later and the key silently stops covering it. Hashing
+  the rendered prompt makes the key correct by construction, and it also catches a prompt edit that shipped without a
+  `PROMPT_VERSION` bump. Versions are still hashed separately so an explicit bump invalidates regardless.
+- Deliberate asymmetry between the two caches, and it is worth understanding before changing either: the **parser**
+  key ignores the 24-hour matrix (it never reaches the model, so two scenarios with identical notes and battery share
+  an interpretation), while the **response** key covers the whole scenario including `scenario_id` and tariffs. A test
+  pins each half, because collapsing them either way is a real bug — sharing a response across scenario ids would
+  echo the wrong id.
+- Nothing invalid is ever cached: the parser stores only post-guardrail interpretations, the response cache only
+  post-replay responses. Guardrail failures, provider outages and infeasible interpretations all leave both empty,
+  each asserted. A successful feasibility repair **overwrites** the cached interpretation, so a repeat request does
+  not pay for the same reparse twice.
+- **The concurrency gate queues rather than rejects**, and `/health` bypasses it completely. Rejecting judge traffic
+  to protect the provider would be trading a scored requirement for an unscored one, and a health probe stuck behind a
+  saturated optimizer would make the platform restart a perfectly healthy instance.
+- The `Deadline` now starts in the middleware, *before* queueing, and flows through the route into the service. Had it
+  started after the wait, a queued request could have taken its full 28 s of work on top of an unknown wait and blown
+  the organizer's 30 s limit.
+- One test of mine was wrong, not the code: I varied the note *count* while the canned provider answer still had two
+  entries, so the guardrail correctly rejected it. Fixed the fixture to vary wording while keeping one entry per note.
+- Next session starts at `T-150`/`T-151`: structured JSON logging with correlation IDs and the Guide §23 field list,
+  plus Prometheus-style counters and histograms. Telemetry the layers below already collect —
+  `InterpretationRun` (attempts, repairs, cache_hit, model version), `SolveOutcome`, `ValidationReport`, and both
+  `CacheStats` — is waiting to be surfaced.

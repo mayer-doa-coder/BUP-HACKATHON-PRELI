@@ -200,7 +200,7 @@ def test_success_wire_format_matches_the_canonical_shape(public_cases):
     reference = OptimizeResponse.model_validate(case["expected_output"])
 
     class _StubService:
-        async def run(self, _request):
+        async def run(self, _request, deadline=None):
             return reference
 
     app = create_app()
