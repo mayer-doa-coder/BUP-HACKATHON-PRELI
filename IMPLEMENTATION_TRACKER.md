@@ -3,10 +3,10 @@
 **Purpose:** single source of truth for *what is built, what is next, and why*. This file exists so that work can
 resume in a brand-new chat/thread without re-reading the ~6,400 lines of `docs/`.
 
-**Status:** `P17 + P18 COMPLETE (P16 deployment delegated) — awaiting approval to start P19`
+**Status:** `P0-P18 COMPLETE (P19 dropped; P16 deploy + P20 docs/video delegated)`
 **Last updated:** 2026-09-18
-**Current phase:** P19 (not started)
-**Next action:** `T-190` (CI pipeline)
+**Current phase:** P20 — teammates own the README and video; `T-202` release freeze remains
+**Next action:** verify the deployed endpoint, then freeze versions (`T-202`)
 
 ---
 
@@ -57,9 +57,9 @@ starting the next phase. (User instruction, session 2.)
 
 | Field | Value |
 |---|---|
-| Phase | P19 — CI (not started) |
-| Last completed task | `T-180` (P17 + P18 complete) |
-| Next task | `T-190` |
+| Phase | P20 — Docs, video, release freeze (owned by teammates) |
+| Last completed task | `T-180` (P17 + P18 complete; P19 dropped) |
+| Next task | `T-202` (release freeze) — `T-200`/`T-201` are with teammates |
 | Tests passing | 458 / 458 (+2 `live` deselected), `ruff check .` clean |
 | Public cases passing | 10 / 10 and 44 / 44 end-to-end over HTTP; optimization ratio exactly 1.000000 on every known case |
 | Endpoint deployed | no |
@@ -680,10 +680,14 @@ by default, stay out of the OpenAPI document, and the page is asserted to refere
 > container may have no outbound internet and a demo that loses its chart library in front of a reviewer is worse
 > than no demo.
 
-### P19 — CI `[ ]`
+### P19 — CI `[-]` DROPPED
 
-- `[ ] T-190` GitHub Actions per Guide §33: ruff → types → unit → property/metamorphic → public integration → adversarial
-  fixtures → API contract → secret scan → docker build → run container → `/health` → one full optimize → replay PASS.
+- `[-] T-190` GitHub Actions. **Dropped at the user's request (session 15); not deferred.**
+  The checks the pipeline would have run all exist and are runnable locally, so nothing is lost but the automation:
+  `ruff check .`, `pytest` (458 tests), `python scripts/run_public_cases.py`, `python scripts/verify_docker.py`,
+  `python scripts/warm_canary.py`. Re-adding CI later means wiring those five commands into a workflow file — no
+  code changes. Guide §33 lists CI as recommended, not as a scored requirement; the rubric scores the endpoint,
+  the artefacts and the documentation.
 
 ### P20 — Docs, video, release freeze `[ ]`
 
@@ -1134,5 +1138,27 @@ Append one entry per working session, newest last. Keep entries short and factua
   response exactly.
 - The no-storage cost comparison is **labelled infeasible** when a grid cap makes it impossible, rather than quoting a
   saving against a plan nobody could legally run.
-- Next session starts at `T-190`: the CI pipeline. Note for it — CI must run with credentials absent (the conftest
-  guard makes that the default) and must not depend on `docs/` fixtures being present in a slim checkout.
+- P19 (CI) is **dropped** at the user's request; the checks it would have automated all run locally.
+
+### 2026-09-18 — Session 15 (P19 dropped; full P0-P18 verification)
+
+- **P19 dropped, not deferred.** Every check the workflow would have run exists as a local command:
+  `ruff check .`, `pytest`, `run_public_cases.py`, `verify_docker.py`, `warm_canary.py`. Guide §33 lists CI as
+  recommended; the rubric scores the endpoint, the artefacts and the documentation, none of which need a workflow.
+- **Audited P0-P18 against disk rather than against this file.** All 50 manifest entries exist. 19 acceptance
+  criteria re-checked directly in one pass: reference responses parse, 44 plans replay clean at 1e-9, compiler and
+  independent envelope agree on 44 cases, 44 cases reach the published optimum with optimality proven, responses
+  build and replay, the regression runner passes 10/10, the prompt carries the contrast rules and withholds the
+  24-hour matrix, the schema exposes exactly six variants, guardrails classify correctly, repair covers every failure
+  class, cache keys separate on battery, notes redact, and demo gating needs both flags. **19/19 passed.**
+- 458 tests green, `ruff` clean.
+- **End-to-end against the real model and the real endpoint: 10/10 public cases correct** — every interpretation
+  matched ground truth and every cost matched the published optimum exactly. Repeated over three uncached passes:
+  30/30 correct.
+- **Latency finding worth acting on.** The first request after start cost **8.2 s** (cold model/schema compile),
+  which alone would put p95 in the 2/3 band. Warm, uncached steady state is **p50 2.6-2.7 s, p95 3.1-3.4 s** — the
+  3/3 full-credit band. So `scripts/warm_canary.py` is not optional polish: **run it after deploy and before judging**,
+  or the first judged request pays the cold cost. This is now the single most important operational step.
+- Secret hygiene re-verified: `.env` and `.env.bak` are both git-ignored and both excluded from the Docker build
+  context; the only tracked env file is `.env.example`, which holds no values.
+- Remaining work is **P20**, owned by teammates (README, video) plus `T-202` release freeze, and the P16 deploy.
